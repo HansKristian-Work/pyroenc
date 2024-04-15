@@ -1,0 +1,80 @@
+#version 450
+#extension GL_EXT_samplerless_texture_functions : require
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform mediump texture2D uImage;
+layout(set = 0, binding = 1) writeonly uniform mediump image2D uLuma;
+layout(set = 0, binding = 2) writeonly uniform mediump image2D uChroma;
+
+layout(push_constant) uniform Registers
+{
+    ivec2 resolution;
+	float dither_strength;
+} registers;
+
+// BT709. Row-major.
+const mediump mat3 rgb_to_yuv = mat3(
+		vec3(0.2126, 0.7152, 0.0722),
+		vec3(-0.114572, -0.385428, 0.5),
+		vec3(0.5, -0.454153, -0.0458471));
+
+#define D(x) ((x) - 0.5)
+const mediump float dither[] = float[](
+		D(0.0625), D(0.5625), D(0.1875), D(0.6875),
+		D(0.8125), D(0.3125), D(0.9375), D(0.4375),
+		D(0.25), D(0.75), D(0.125), D(0.625),
+		D(1.00), D(0.5), D(0.875), D(0.375));
+
+// Preswizzle the LUT in 2x2 quad pattern.
+const mediump vec4 dither_luma[] = vec4[](
+	vec4(D(0.0625), D(0.5625), D(0.8125), D(0.3125)),
+	vec4(D(0.1875), D(0.6875), D(0.9375), D(0.4375)),
+	vec4(D(0.25), D(0.75), D(1.00), D(0.5)),
+	vec4(D(0.125), D(0.625), D(0.875), D(0.375)));
+
+void main()
+{
+	// Each thread works on a 2x2 luma region and 1x1 chroma region.
+	ivec2 coord = ivec2(gl_GlobalInvocationID.xy) * 2;
+
+	// Left-sited chroma filtering. 6 taps.
+	int x0 = clamp(coord.x - 1, 0, registers.resolution.x - 1);
+	int x1 = min(coord.x, registers.resolution.x - 1);
+	int x2 = min(coord.x + 1, registers.resolution.x - 1);
+
+	int y0 = min(coord.y, registers.resolution.y - 1);
+	int y1 = min(coord.y + 1, registers.resolution.y - 1);
+
+	mediump vec3 rgb00 = texelFetch(uImage, ivec2(x0, y0), 0).rgb;
+	mediump vec3 rgb10 = texelFetch(uImage, ivec2(x1, y0), 0).rgb;
+	mediump vec3 rgb20 = texelFetch(uImage, ivec2(x2, y0), 0).rgb;
+	mediump vec3 rgb01 = texelFetch(uImage, ivec2(x0, y1), 0).rgb;
+	mediump vec3 rgb11 = texelFetch(uImage, ivec2(x1, y1), 0).rgb;
+	mediump vec3 rgb21 = texelFetch(uImage, ivec2(x2, y1), 0).rgb;
+
+	mediump vec4 luma = vec4(
+		dot(rgb10, rgb_to_yuv[0]),
+		dot(rgb20, rgb_to_yuv[0]),
+		dot(rgb11, rgb_to_yuv[0]),
+		dot(rgb21, rgb_to_yuv[0]));
+
+	// Scale to range.
+	luma = luma * (219.0 / 255.0) + (16.0 / 255.0);
+	luma += dither_luma[(gl_LocalInvocationID.x & 1) + (gl_LocalInvocationID.y & 1) * 2] * registers.dither_strength;
+	imageStore(uLuma, coord, luma.xxxx);
+	imageStore(uLuma, coord + ivec2(1, 0), luma.yyyy);
+	imageStore(uLuma, coord + ivec2(0, 1), luma.zzzz);
+	imageStore(uLuma, coord + ivec2(1), luma.wwww);
+
+	// RGB to YCbCr is a linear transform.
+	// We can filter in RGB instead of YCbCr domain.
+	mediump vec3 rgb = rgb10 * 0.25 + rgb11 * 0.25 +
+		rgb00 * 0.125 + rgb01 * 0.125 +
+		rgb20 * 0.125 + rgb21 * 0.125;
+
+	mediump vec2 cbcr = rgb * mat2x3(rgb_to_yuv[1], rgb_to_yuv[2]);
+	cbcr = cbcr * (224.0 / 255.0) + (128.0 / 255.0);
+	cbcr += dither[(gl_LocalInvocationID.y & 3u) * 4 + (gl_LocalInvocationID.x & 3u)] * registers.dither_strength;
+
+	imageStore(uChroma, ivec2(gl_GlobalInvocationID.xy), cbcr.xyxy);
+}
