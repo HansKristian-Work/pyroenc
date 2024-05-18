@@ -236,6 +236,7 @@ struct Encoder::Impl
 	VkQueryPool query_pool = VK_NULL_HANDLE;
 
 	VkTable table = {};
+	bool func_table_is_valid = false;
 	Frame frame_pool[FramePoolSize] = {};
 	std::atomic_uint32_t active_frame_pool_indices;
 
@@ -673,6 +674,10 @@ Encoder::Impl::Impl()
 
 Encoder::Impl::~Impl()
 {
+	// Relevant if we never initialized the encoder.
+	if (!func_table_is_valid)
+		return;
+
 	while (!encoded_queue.empty())
 		encoded_queue.pop();
 
@@ -718,6 +723,7 @@ bool Encoder::Impl::init_func_table()
 #undef INSTANCE_FUNCTION
 #undef DEVICE_FUNCTION
 
+	func_table_is_valid = true;
 	return true;
 }
 
