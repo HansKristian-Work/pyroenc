@@ -34,6 +34,7 @@ struct EncoderCreateInfo
 
 	uint32_t frame_rate_num;
 	uint32_t frame_rate_den;
+	float quality_level;
 
 	struct
 	{

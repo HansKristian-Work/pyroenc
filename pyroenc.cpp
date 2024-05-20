@@ -142,6 +142,10 @@ struct VideoSession
 struct VideoSessionParameters
 {
 	VkVideoSessionParametersKHR params = VK_NULL_HANDLE;
+	VkVideoEncodeQualityLevelInfoKHR quality_level =
+		{ VK_STRUCTURE_TYPE_VIDEO_ENCODE_QUALITY_LEVEL_INFO_KHR };
+	VkVideoEncodeQualityLevelPropertiesKHR quality_level_props =
+		{ VK_STRUCTURE_TYPE_VIDEO_ENCODE_QUALITY_LEVEL_PROPERTIES_KHR };
 
 	union
 	{
@@ -150,6 +154,7 @@ struct VideoSessionParameters
 			StdVideoH264SequenceParameterSet sps;
 			StdVideoH264PictureParameterSet pps;
 			StdVideoH264SequenceParameterSetVui vui;
+			VkVideoEncodeH264QualityLevelPropertiesKHR quality_level_props;
 		} h264;
 	};
 
@@ -169,8 +174,6 @@ struct RateControl
 		{ VK_STRUCTURE_TYPE_VIDEO_ENCODE_RATE_CONTROL_INFO_KHR };
 	VkVideoEncodeRateControlLayerInfoKHR layer =
 		{ VK_STRUCTURE_TYPE_VIDEO_ENCODE_RATE_CONTROL_LAYER_INFO_KHR };
-	VkVideoEncodeQualityLevelInfoKHR quality_level =
-		{ VK_STRUCTURE_TYPE_VIDEO_ENCODE_QUALITY_LEVEL_INFO_KHR };
 
 	union
 	{
@@ -1504,8 +1507,6 @@ void Encoder::Impl::log(Severity severity, const char *fmt, Ts&&... ts)
 bool Encoder::set_rate_control_info(const RateControlInfo &info)
 {
 	impl->rate.info = info;
-	if (impl->rate.info.gop_frames == 0)
-		impl->rate.info.gop_frames = 1;
 	impl->rate.needs_reset = true;
 	return impl->rate.init(*impl);
 }
@@ -1862,6 +1863,16 @@ bool VideoSessionParameters::init(Encoder::Impl &impl)
 	}
 }
 
+static float saturate(float value)
+{
+	if (value > 1.0f)
+		return 1.0f;
+	else if (value < 0.0f)
+		return 0.0f;
+	else
+		return value;
+}
+
 bool VideoSessionParameters::init_h264(Encoder::Impl &impl)
 {
 	VkVideoSessionParametersCreateInfoKHR session_param_info =
@@ -1978,13 +1989,30 @@ bool VideoSessionParameters::init_h264(Encoder::Impl &impl)
 	session_param_info.pNext = &h264_session_param_info;
 	session_param_info.videoSession = impl.session.session;
 
-	// For now, just pick the highest quality mode.
-	VkVideoEncodeQualityLevelInfoKHR quality_level =
-		{ VK_STRUCTURE_TYPE_VIDEO_ENCODE_QUALITY_LEVEL_INFO_KHR };
-	quality_level.qualityLevel = impl.caps.encode_caps.maxQualityLevels - 1;
+	auto &table = impl.table;
+
+	// Simple rounding to nearest quality level.
+	quality_level.qualityLevel = uint32_t(saturate(impl.info.quality_level) *
+	                                      float(impl.caps.encode_caps.maxQualityLevels - 1) + 0.5f);
 	h264_session_param_info.pNext = &quality_level;
 
-	auto &table = impl.table;
+	// Query some properties for the quality level we chose.
+	VkPhysicalDeviceVideoEncodeQualityLevelInfoKHR quality_level_info =
+			{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VIDEO_ENCODE_QUALITY_LEVEL_INFO_KHR };
+	quality_level_info.pVideoProfile = &impl.profile.profile_info;
+	quality_level_info.qualityLevel = quality_level.qualityLevel;
+	h264.quality_level_props = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_QUALITY_LEVEL_PROPERTIES_KHR };
+	quality_level_props.pNext = &h264.quality_level_props;
+	VK_CALL(vkGetPhysicalDeviceVideoEncodeQualityLevelPropertiesKHR(impl.info.gpu, &quality_level_info,
+	                                                                &quality_level_props));
+
+	// A low quality mode might opt for using CAVLC instead of CABAC.
+	if (!h264.quality_level_props.preferredStdEntropyCodingModeFlag &&
+	    (impl.caps.h264.caps.stdSyntaxFlags & VK_VIDEO_ENCODE_H264_STD_ENTROPY_CODING_MODE_FLAG_UNSET_BIT_KHR) != 0)
+	{
+		pps.flags.entropy_coding_mode_flag = 0;
+	}
+
 	if (VK_CALL(vkCreateVideoSessionParametersKHR(impl.info.device, &session_param_info,
 	                                              nullptr, &params)) != VK_SUCCESS)
 	{
@@ -2114,14 +2142,34 @@ bool RateControl::init(Encoder::Impl &impl)
 			h264.rate_control = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_RATE_CONTROL_INFO_KHR };
 			h264.layer = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_RATE_CONTROL_LAYER_INFO_KHR };
 
+			// If GOP is invalid, override it with some sensible defaults.
+			if (info.gop_frames == 0)
+				info.gop_frames = impl.session_params.h264.quality_level_props.preferredGopFrameCount;
+			if (info.gop_frames == 0)
+				info.gop_frames = 1;
+
 			h264.rate_control.consecutiveBFrameCount = 0;
 			h264.rate_control.idrPeriod = info.gop_frames;
 			h264.rate_control.gopFrameCount = info.gop_frames;
 			// VUID 07022 only says we have to set this if layerCount > 1, not if it's == 1.
 			// Seems to work fine.
 			//h264.rate_control.temporalLayerCount = 1;
-			h264.rate_control.flags = VK_VIDEO_ENCODE_H264_RATE_CONTROL_REGULAR_GOP_BIT_KHR |
-			                          VK_VIDEO_ENCODE_H264_RATE_CONTROL_REFERENCE_PATTERN_FLAT_BIT_KHR;
+
+			// When we start using intra-refresh, we cannot use these.
+			if ((impl.session_params.h264.quality_level_props.preferredRateControlFlags &
+			     VK_VIDEO_ENCODE_H264_RATE_CONTROL_REFERENCE_PATTERN_FLAT_BIT_KHR) != 0)
+			{
+				// VUID 02818. If REFERENCE_PATTERN_FLAT is used, REGULAR_GOP must also be set.
+				h264.rate_control.flags |= VK_VIDEO_ENCODE_H264_RATE_CONTROL_REGULAR_GOP_BIT_KHR |
+				                           VK_VIDEO_ENCODE_H264_RATE_CONTROL_REFERENCE_PATTERN_FLAT_BIT_KHR;
+			}
+			else if ((impl.session_params.h264.quality_level_props.preferredRateControlFlags &
+			          VK_VIDEO_ENCODE_H264_RATE_CONTROL_REGULAR_GOP_BIT_KHR) != 0)
+			{
+				h264.rate_control.flags |= VK_VIDEO_ENCODE_H264_RATE_CONTROL_REGULAR_GOP_BIT_KHR;
+			}
+
+			// We don't consider dyadic patterns here. We don't use B-frames yet.
 
 			// Don't attempt HRD compliance since we're not emitting HRD data in SPS/PPS anyway.
 			//if (impl.caps.h264.caps.flags & VK_VIDEO_ENCODE_H264_CAPABILITY_HRD_COMPLIANCE_BIT_KHR)
@@ -2147,12 +2195,9 @@ bool RateControl::init(Encoder::Impl &impl)
 		}
 	}
 
-	// This supposedly maps to P1, P2, P3, ... etc, in NVENC.
-	quality_level.qualityLevel = impl.caps.encode_caps.maxQualityLevels - 1;
-	quality_level.pNext = ctrl_info.pNext;
-	ctrl_info.pNext = &quality_level;
+	impl.session_params.quality_level.pNext = ctrl_info.pNext;
+	ctrl_info.pNext = &impl.session_params.quality_level;
 	ctrl_info.flags |= VK_VIDEO_CODING_CONTROL_ENCODE_QUALITY_LEVEL_BIT_KHR;
-	// TODO: Query VkVideoEncode*QualityLevelPropertiesKHR?
 
 	return true;
 }

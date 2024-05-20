@@ -63,6 +63,7 @@ To create an encoder, various information must be provided, such as:
   - Encoding profile
   - Frame rate
   - Tuning parameters
+  - Quality level. 0.0f maps to qualityLevel = 0 and 1.0f maps to maxQualityLevels - 1.
 
 ```
 #include "pyroenc.hpp"

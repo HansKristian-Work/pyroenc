@@ -69,6 +69,7 @@ int main(int argc, char *argv[])
 	info.width = width;
 	info.height = height;
 	info.profile = Profile::H264_High;
+	info.quality_level = 1.0f;
 
 	info.encode_queue.queue =
 			dev.get_queue_info().queues[QUEUE_INDEX_VIDEO_ENCODE];

@@ -5,6 +5,7 @@ INSTANCE_FUNCTION(GetPhysicalDeviceVideoFormatPropertiesKHR);
 INSTANCE_FUNCTION(GetPhysicalDeviceFormatProperties2);
 INSTANCE_FUNCTION(GetPhysicalDeviceImageFormatProperties2);
 INSTANCE_FUNCTION(GetPhysicalDeviceVideoCapabilitiesKHR);
+INSTANCE_FUNCTION(GetPhysicalDeviceVideoEncodeQualityLevelPropertiesKHR);
 DEVICE_FUNCTION(QueueSubmit2);
 DEVICE_FUNCTION(WaitSemaphores);
 DEVICE_FUNCTION(DestroyImageView);
