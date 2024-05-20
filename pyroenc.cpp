@@ -2117,7 +2117,9 @@ bool RateControl::init(Encoder::Impl &impl)
 			h264.rate_control.consecutiveBFrameCount = 0;
 			h264.rate_control.idrPeriod = info.gop_frames;
 			h264.rate_control.gopFrameCount = info.gop_frames;
-			h264.rate_control.temporalLayerCount = 1;
+			// VUID 07022 only says we have to set this if layerCount > 1, not if it's == 1.
+			// Seems to work fine.
+			//h264.rate_control.temporalLayerCount = 1;
 			h264.rate_control.flags = VK_VIDEO_ENCODE_H264_RATE_CONTROL_REGULAR_GOP_BIT_KHR |
 			                          VK_VIDEO_ENCODE_H264_RATE_CONTROL_REFERENCE_PATTERN_FLAT_BIT_KHR;
 
