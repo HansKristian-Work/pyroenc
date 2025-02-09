@@ -17,9 +17,11 @@ struct VkTable
 {
 #define INSTANCE_FUNCTION(fun) PFN_vk##fun vk##fun
 #define DEVICE_FUNCTION(fun) PFN_vk##fun vk##fun
+#define DEVICE_FUNCTION_FALLBACK(fun, fall) PFN_vk##fun vk##fun
 #include "pyroenc_vk_table.inl"
 #undef INSTANCE_FUNCTION
 #undef DEVICE_FUNCTION
+#undef DEVICE_FUNCTION_FALLBACK
 };
 
 struct ConversionRegisters
@@ -729,18 +731,27 @@ bool Encoder::Impl::init_func_table()
 	if (!table.vk##fun) \
 		return false
 #define DEVICE_FUNCTION(fun)
+#define DEVICE_FUNCTION_FALLBACK(fun, fall)
 #include "pyroenc_vk_table.inl"
 #undef INSTANCE_FUNCTION
 #undef DEVICE_FUNCTION
+#undef DEVICE_FUNCTION_FALLBACK
 
 #define INSTANCE_FUNCTION(fun)
 #define DEVICE_FUNCTION(fun) \
 	table.vk##fun = (PFN_vk##fun)table.vkGetDeviceProcAddr(info.device, "vk" #fun); \
 	if (!table.vk##fun) \
 		return false
+#define DEVICE_FUNCTION_FALLBACK(fun, fall) \
+	table.vk##fun = (PFN_vk##fun)table.vkGetDeviceProcAddr(info.device, "vk" #fun); \
+	if (!table.vk##fun) \
+		table.vk##fun = (PFN_vk##fun)table.vkGetDeviceProcAddr(info.device, "vk" #fall); \
+	if (!table.vk##fun) \
+		return false
 #include "pyroenc_vk_table.inl"
 #undef INSTANCE_FUNCTION
 #undef DEVICE_FUNCTION
+#undef DEVICE_FUNCTION_FALLBACK
 
 	func_table_is_valid = true;
 	return true;

@@ -31,7 +31,7 @@ DEVICE_FUNCTION(CreateComputePipelines);
 DEVICE_FUNCTION(CreateShaderModule);
 DEVICE_FUNCTION(CreateDescriptorSetLayout);
 DEVICE_FUNCTION(CreatePipelineLayout);
-DEVICE_FUNCTION(CmdPushDescriptorSetKHR);
+DEVICE_FUNCTION_FALLBACK(CmdPushDescriptorSetKHR, CmdPushDescriptorSet);
 DEVICE_FUNCTION(DestroyShaderModule);
 DEVICE_FUNCTION(CreateVideoSessionKHR);
 DEVICE_FUNCTION(DestroyVideoSessionKHR);

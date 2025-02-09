@@ -11,13 +11,16 @@ Development of this Vulkan video encoding library has been made in partnership w
 
 ## Device support
 
-So far, it only works on NVIDIA. The goal is to support every correct Vulkan video
+As of May 2024, it only works on NVIDIA. The goal is to support every correct Vulkan video
 implementation, but RADV and AMD Windows drivers are known to crash.
 PyroEnc is actively tested against Vulkan validation layers.
+
+TODO: Current status of non-NVIDIA drivers is unknown.
 
 ## Features
 
 Currently, H.264 encode with a simple I and P GOP structure is supported.
+H.265 is also supported, but it is highly experimental.
 The end goal is to support:
 
 - H.264
@@ -36,7 +39,7 @@ the need arise.
 
 ### Future features when drivers mature
 
-- Intra-refresh with multiple slice approach
+- Intra-refresh
 
 ## API
 
@@ -47,11 +50,10 @@ NOTE: The API is not frozen yet and will change as the implementation matures.
 To create an encoder, various information must be provided, such as:
 
 - VkInstance
-  - Must enable Vulkan 1.3 in apiVersion
+  - Must enable Vulkan 1.3 or above in apiVersion
 - VkPhysicalDevice
 - VkDevice
-  - Must support Vulkan 1.3 and have `VK_KHR_push_descriptor` extension enabled
-    - `VK_KHR_push_descriptor` requirement may be dropped if need be
+  - Must support Vulkan 1.3 and have `VK_KHR_push_descriptor` extension enabled, or Vulkan 1.4 with pushDescriptor feature enabled
   - Must have video extensions and queues enabled 
     - Potentially, PyroEnc can provide an interface to help doing this, but currently does not
 - vkGetInstanceProcAddr callback
