@@ -156,6 +156,15 @@ struct VideoSessionParameters
 			StdVideoH264SequenceParameterSetVui vui;
 			VkVideoEncodeH264QualityLevelPropertiesKHR quality_level_props;
 		} h264;
+
+		struct
+		{
+			StdVideoH265SequenceParameterSet sps;
+			StdVideoH265PictureParameterSet pps;
+			StdVideoH265VideoParameterSet vps;
+			StdVideoH265SequenceParameterSetVui vui;
+			VkVideoEncodeH265QualityLevelPropertiesKHR quality_level_props;
+		} h265;
 	};
 
 	bool init(Encoder::Impl &impl);
@@ -163,6 +172,7 @@ struct VideoSessionParameters
 	std::vector<uint8_t> encoded_parameters;
 
 	bool init_h264(Encoder::Impl &impl);
+	bool init_h265(Encoder::Impl &impl);
 };
 
 struct RateControl
@@ -182,6 +192,12 @@ struct RateControl
 			VkVideoEncodeH264RateControlInfoKHR rate_control;
 			VkVideoEncodeH264RateControlLayerInfoKHR layer;
 		} h264;
+
+		struct
+		{
+			VkVideoEncodeH265RateControlInfoKHR rate_control;
+			VkVideoEncodeH265RateControlLayerInfoKHR layer;
+		} h265;
 	};
 
 	bool init(Encoder::Impl &impl);
@@ -997,6 +1013,27 @@ void Encoder::Impl::record_host_barrier(VkCommandBuffer cmd, Frame &frame)
 	VK_CALL(vkCmdPipelineBarrier2(cmd, &deps));
 }
 
+struct H265EncodeInfo
+{
+	VkVideoEncodeH265PictureInfoKHR h265_src_info = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_H265_PICTURE_INFO_KHR };
+	VkVideoEncodeH265NaluSliceSegmentInfoKHR slice = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_H265_NALU_SLICE_SEGMENT_INFO_KHR };
+	StdVideoEncodeH265SliceSegmentHeader slice_header = {};
+	StdVideoEncodeH265PictureInfo pic = {};
+	StdVideoEncodeH265ReferenceListsInfo ref_lists = {};
+
+	VkVideoEncodeH265DpbSlotInfoKHR h265_reconstructed_dpb_slot = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_H265_DPB_SLOT_INFO_KHR };
+	StdVideoEncodeH265ReferenceInfo h265_reconstructed_ref = {};
+
+	VkVideoEncodeH265DpbSlotInfoKHR h265_prev_ref_slot = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_H265_DPB_SLOT_INFO_KHR };
+	StdVideoEncodeH265ReferenceInfo h265_prev_ref = {};
+
+	VkVideoEncodeH265GopRemainingFrameInfoKHR gop_remaining =
+		{ VK_STRUCTURE_TYPE_VIDEO_ENCODE_H265_GOP_REMAINING_FRAME_INFO_KHR };
+
+	void setup(const VideoEncoderCaps &caps, const VideoSessionParameters &params, RateControl &rate,
+	           VkVideoBeginCodingInfoKHR &begin_info, VkVideoEncodeInfoKHR &info);
+};
+
 struct H264EncodeInfo
 {
 	VkVideoEncodeH264PictureInfoKHR h264_src_info = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_PICTURE_INFO_KHR };
@@ -1104,6 +1141,94 @@ void H264EncodeInfo::setup(
 	begin_info.pNext = &gop_remaining;
 }
 
+void H265EncodeInfo::setup(
+		const VideoEncoderCaps &caps,
+		const VideoSessionParameters &params, RateControl &rate,
+		VkVideoBeginCodingInfoKHR &begin_info,
+		VkVideoEncodeInfoKHR &info)
+{
+	// Mostly based on nvpro sample.
+	// I don't really know what I'm doing here, but seems to work on NVIDIA at least.
+
+	bool is_idr = rate.gop_frame_index == 0;
+
+	for (uint32_t i = 0; i < STD_VIDEO_H265_MAX_NUM_LIST_REF; i++)
+	{
+		ref_lists.RefPicList0[i] = i || is_idr ? STD_VIDEO_H265_NO_REFERENCE_PICTURE : ((rate.gop_frame_index - 1) & 1);
+		ref_lists.RefPicList1[i] = STD_VIDEO_H265_NO_REFERENCE_PICTURE;
+	}
+
+	pic.flags.IrapPicFlag = is_idr ? 1 : 0;
+	pic.flags.is_reference = 1;
+	pic.flags.pic_output_flag = 1;
+	pic.flags.short_term_ref_pic_set_sps_flag = 1;
+	pic.flags.no_output_of_prior_pics_flag = is_idr && rate.idr_pic_id ? 1 : 0;
+	pic.pRefLists = &ref_lists;
+
+	if (is_idr)
+		rate.idr_pic_id++;
+
+	slice.pStdSliceSegmentHeader = &slice_header;
+	slice_header.slice_type = is_idr ? STD_VIDEO_H265_SLICE_TYPE_I : STD_VIDEO_H265_SLICE_TYPE_P;
+	slice_header.MaxNumMergeCand = 5;
+	slice_header.flags.first_slice_segment_in_pic_flag = 1;
+	slice_header.flags.slice_sao_chroma_flag = 1;
+	slice_header.flags.slice_sao_luma_flag = 1;
+	slice_header.flags.cu_chroma_qp_offset_enabled_flag = 1;
+	slice_header.flags.deblocking_filter_override_flag = 1;
+
+	if (rate.rate_info.rateControlMode == VK_VIDEO_ENCODE_RATE_CONTROL_MODE_DISABLED_BIT_KHR)
+	{
+		slice.constantQp = rate.info.constant_qp;
+		if (slice.constantQp < caps.h265.caps.minQp)
+			slice.constantQp = caps.h265.caps.minQp;
+		else if (slice.constantQp > caps.h265.caps.maxQp)
+			slice.constantQp = caps.h265.caps.maxQp;
+	}
+
+	h265_src_info.naluSliceSegmentEntryCount = 1;
+	h265_src_info.pNaluSliceSegmentEntries = &slice;
+	h265_src_info.pStdPictureInfo = &pic;
+	h265_src_info.pNext = info.pNext;
+	info.pNext = &h265_src_info;
+
+	const uint32_t PicOrderCntMask =
+		((1u << (params.h265.sps.log2_max_pic_order_cnt_lsb_minus4 + 4)) - 1u);
+
+	h265_reconstructed_dpb_slot.pStdReferenceInfo = &h265_reconstructed_ref;
+	h265_reconstructed_ref.PicOrderCntVal = int(rate.gop_frame_index & PicOrderCntMask);
+	const_cast<VkVideoReferenceSlotInfoKHR *>(info.pSetupReferenceSlot)->pNext = &h265_reconstructed_dpb_slot;
+
+	pic.PicOrderCntVal = h265_reconstructed_ref.PicOrderCntVal;
+
+	auto pict_type = is_idr ? STD_VIDEO_H265_PICTURE_TYPE_IDR : STD_VIDEO_H265_PICTURE_TYPE_P;
+	h265_reconstructed_ref.pic_type = pict_type;
+	pic.pic_type = pict_type;
+
+	if (!is_idr)
+	{
+		assert(info.referenceSlotCount == 1);
+		const_cast<VkVideoReferenceSlotInfoKHR &>(info.pReferenceSlots[0]).pNext = &h265_prev_ref_slot;
+		h265_prev_ref_slot.pStdReferenceInfo = &h265_prev_ref;
+
+		h265_prev_ref.PicOrderCntVal = int((rate.gop_frame_index - 1) & PicOrderCntMask);
+
+		// Does this matter?
+		if (rate.gop_frame_index == 1)
+			h265_prev_ref.pic_type = STD_VIDEO_H265_PICTURE_TYPE_IDR;
+		else
+			h265_prev_ref.pic_type = STD_VIDEO_H265_PICTURE_TYPE_P;
+	}
+
+	// This struct may be required by implementation. Providing it does not hurt.
+	gop_remaining.useGopRemainingFrames = VK_TRUE;
+	gop_remaining.gopRemainingB = 0; // TODO
+	gop_remaining.gopRemainingI = is_idr ? 1 : 0;
+	gop_remaining.gopRemainingP = rate.info.gop_frames - rate.gop_frame_index - gop_remaining.gopRemainingI;
+	gop_remaining.pNext = begin_info.pNext;
+	begin_info.pNext = &gop_remaining;
+}
+
 bool Encoder::Impl::record_and_submit_encode(VkCommandBuffer cmd, Frame &frame, bool &is_idr)
 {
 	VkVideoBeginCodingInfoKHR video_coding_info = { VK_STRUCTURE_TYPE_VIDEO_BEGIN_CODING_INFO_KHR };
@@ -1130,6 +1255,7 @@ bool Encoder::Impl::record_and_submit_encode(VkCommandBuffer cmd, Frame &frame, 
 	VkVideoReferenceSlotInfoKHR init_slots[2] = {};
 
 	H264EncodeInfo h264;
+	H265EncodeInfo h265;
 
 	reconstructed_slot_pic.imageViewBinding = dpb.dpb[dpb_index_reconstructed].view;
 	reconstructed_slot_pic.codedExtent = coded_extent;
@@ -1176,6 +1302,10 @@ bool Encoder::Impl::record_and_submit_encode(VkCommandBuffer cmd, Frame &frame, 
 	{
 	case Profile::H264_High:
 		h264.setup(caps, session_params, rate, video_coding_info, encode_info);
+		break;
+
+	case Profile::H265_Main:
+		h265.setup(caps, session_params, rate, video_coding_info, encode_info);
 		break;
 
 	default:
@@ -1725,6 +1855,16 @@ bool VideoProfile::setup(Encoder::Impl &impl, Profile profile)
 		profile_info.pNext = &h264.profile;
 		break;
 
+	case Profile::H265_Main:
+		h265.profile = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_H265_PROFILE_INFO_KHR };
+		profile_info.chromaSubsampling = VK_VIDEO_CHROMA_SUBSAMPLING_420_BIT_KHR;
+		profile_info.chromaBitDepth = VK_VIDEO_COMPONENT_BIT_DEPTH_8_BIT_KHR;
+		profile_info.lumaBitDepth = VK_VIDEO_COMPONENT_BIT_DEPTH_8_BIT_KHR;
+		profile_info.videoCodecOperation = VK_VIDEO_CODEC_OPERATION_ENCODE_H265_BIT_KHR;
+		h265.profile.stdProfileIdc = STD_VIDEO_H265_PROFILE_IDC_MAIN;
+		profile_info.pNext = &h265.profile;
+		break;
+
 	default:
 		return false;
 	}
@@ -1753,6 +1893,11 @@ bool VideoEncoderCaps::setup(Encoder::Impl &impl)
 	case Profile::H264_High:
 		h264.caps = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_CAPABILITIES_KHR };
 		encode_caps.pNext = &h264.caps;
+		break;
+
+	case Profile::H265_Main:
+		h265.caps = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_H265_CAPABILITIES_KHR };
+		encode_caps.pNext = &h265.caps;
 		break;
 
 	default:
@@ -1858,6 +2003,9 @@ bool VideoSessionParameters::init(Encoder::Impl &impl)
 	case Profile::H264_High:
 		return init_h264(impl);
 
+	case Profile::H265_Main:
+		return init_h265(impl);
+
 	default:
 		return false;
 	}
@@ -1871,6 +2019,232 @@ static float saturate(float value)
 		return 0.0f;
 	else
 		return value;
+}
+
+// Could trivially use compiler intrinsics, but this isn't perf critical, so *shrug*.
+static uint32_t find_lsb(uint32_t v)
+{
+	for (int i = 0; i < 32; i++)
+		if (v & (1u << i))
+			return i;
+
+	return UINT32_MAX;
+}
+
+static uint32_t find_msb(uint32_t v)
+{
+	for (int i = 31; i >= 0; i--)
+		if (v & (1u << i))
+			return i;
+
+	return UINT32_MAX;
+}
+
+bool VideoSessionParameters::init_h265(Encoder::Impl &impl)
+{
+	// Mostly adapted from nvpro-samples VkEncoderConfigH265.cpp.
+	// Most of this is HEVC gibberish. I don't really know what I'm doing here :)
+
+	VkVideoSessionParametersCreateInfoKHR session_param_info =
+		{ VK_STRUCTURE_TYPE_VIDEO_SESSION_PARAMETERS_CREATE_INFO_KHR };
+	VkVideoEncodeH265SessionParametersCreateInfoKHR h265_session_param_info =
+		{ VK_STRUCTURE_TYPE_VIDEO_ENCODE_H265_SESSION_PARAMETERS_CREATE_INFO_KHR };
+	h265_session_param_info.maxStdPPSCount = 1;
+	h265_session_param_info.maxStdSPSCount = 1;
+	h265_session_param_info.maxStdVPSCount = 1;
+
+	auto &sps = h265.sps;
+	auto &pps = h265.pps;
+	auto &vps = h265.vps;
+	auto &vui = h265.vui;
+
+	pps = {};
+	sps = {};
+	vps = {};
+	vui = {};
+
+	sps.flags.vui_parameters_present_flag = 1;
+	sps.pSequenceParameterSetVui = &vui;
+	sps.num_short_term_ref_pic_sets = 1;
+
+	vui.flags.aspect_ratio_info_present_flag = 1;
+	// Aspect ratio of pixels (SAR), not actual aspect ratio. Confusing, I know.
+	vui.aspect_ratio_idc = STD_VIDEO_H265_ASPECT_RATIO_IDC_SQUARE;
+
+	vui.flags.chroma_loc_info_present_flag = 1;
+	vui.chroma_sample_loc_type_bottom_field = 0;
+	vui.chroma_sample_loc_type_top_field = 0;
+
+	vui.flags.video_signal_type_present_flag = 1;
+	vui.flags.video_full_range_flag = 0;
+	vui.flags.colour_description_present_flag = 1;
+	vui.flags.motion_vectors_over_pic_boundaries_flag = 1;
+	vui.flags.restricted_ref_pic_lists_flag = 1;
+
+	vui.flags.vui_timing_info_present_flag = 1;
+	vui.vui_num_units_in_tick = impl.info.frame_rate_den;
+	vui.vui_time_scale = impl.info.frame_rate_num;
+
+	vui.video_format = 5; // Unspecified. The specified ones cover legacy PAL/NTSC, etc.
+	vui.colour_primaries = 1; // BT.709
+	vui.transfer_characteristics = 1; // BT.709
+	vui.matrix_coeffs = 1; // BT.709
+	VkVideoEncodeH265SessionParametersAddInfoKHR add_info =
+		{ VK_STRUCTURE_TYPE_VIDEO_ENCODE_H265_SESSION_PARAMETERS_ADD_INFO_KHR };
+
+	vui.log2_max_mv_length_horizontal = 10;
+	vui.log2_max_mv_length_vertical = 10;
+
+	if (impl.profile.profile_info.chromaSubsampling == VK_VIDEO_CHROMA_SUBSAMPLING_420_BIT_KHR)
+		sps.chroma_format_idc = STD_VIDEO_H265_CHROMA_FORMAT_IDC_420;
+	else if (impl.profile.profile_info.chromaSubsampling == VK_VIDEO_CHROMA_SUBSAMPLING_422_BIT_KHR)
+		sps.chroma_format_idc = STD_VIDEO_H265_CHROMA_FORMAT_IDC_422;
+	else
+		sps.chroma_format_idc = STD_VIDEO_H265_CHROMA_FORMAT_IDC_444;
+
+	// TODO
+	constexpr bool is_10bit = false;
+	if (is_10bit)
+	{
+		sps.bit_depth_luma_minus8 = 2;
+		sps.bit_depth_chroma_minus8 = 2;
+	}
+
+	StdVideoH265ProfileTierLevel level = {};
+	level.general_level_idc = impl.caps.h265.caps.maxLevelIdc;
+	level.general_profile_idc = impl.profile.h265.profile.stdProfileIdc;
+	sps.pProfileTierLevel = &level;
+	level.flags.general_progressive_source_flag = 1;
+	level.flags.general_frame_only_constraint_flag = 1;
+	level.flags.general_tier_flag = 1;
+
+	//sps.flags.sps_temporal_id_nesting_flag = 1;
+	//sps.flags.sps_sub_layer_ordering_info_present_flag = 1;
+	sps.flags.amp_enabled_flag = 1;
+	sps.flags.sample_adaptive_offset_enabled_flag = 1;
+
+	uint32_t ctb_min_size = 1u << (find_lsb(impl.caps.h265.caps.ctbSizes) + 4);
+	uint32_t aligned_width = (impl.info.width + ctb_min_size - 1) & ~(ctb_min_size - 1);
+	uint32_t aligned_height = (impl.info.height + ctb_min_size - 1) & ~(ctb_min_size - 1);
+
+	if (aligned_width != impl.info.width || aligned_height != impl.info.height)
+	{
+		sps.flags.conformance_window_flag = 1;
+		sps.conf_win_right_offset = aligned_width - impl.info.width;
+		sps.conf_win_bottom_offset = aligned_height - impl.info.height;
+
+		if (sps.chroma_format_idc != STD_VIDEO_H265_CHROMA_FORMAT_IDC_444)
+			sps.conf_win_right_offset >>= 1;
+		if (sps.chroma_format_idc == STD_VIDEO_H265_CHROMA_FORMAT_IDC_420)
+			sps.conf_win_bottom_offset >>= 1;
+	}
+
+	sps.pic_width_in_luma_samples = aligned_width;
+	sps.pic_height_in_luma_samples = aligned_height;
+	// This is arbitrary.
+	sps.log2_max_pic_order_cnt_lsb_minus4 = 4;
+
+	sps.log2_min_luma_transform_block_size_minus2 = find_lsb(impl.caps.h265.caps.transformBlockSizes);
+	sps.log2_diff_max_min_luma_transform_block_size = find_msb(impl.caps.h265.caps.transformBlockSizes) - find_lsb(impl.caps.h265.caps.transformBlockSizes);
+
+	sps.max_transform_hierarchy_depth_inter = (find_msb(impl.caps.h265.caps.ctbSizes) + 4) - (find_lsb(impl.caps.h265.caps.transformBlockSizes) + 2);
+	sps.max_transform_hierarchy_depth_intra = sps.max_transform_hierarchy_depth_inter;
+
+	sps.log2_min_pcm_luma_coding_block_size_minus3 = find_lsb(impl.caps.h265.caps.ctbSizes) + 4 - 3;
+	sps.log2_diff_max_min_luma_coding_block_size = find_msb(impl.caps.h265.caps.ctbSizes) - find_lsb(impl.caps.h265.caps.ctbSizes);
+	sps.log2_min_luma_coding_block_size_minus3 = sps.log2_min_pcm_luma_coding_block_size_minus3;
+	sps.log2_diff_max_min_pcm_luma_coding_block_size = sps.log2_diff_max_min_pcm_luma_coding_block_size;
+
+	sps.pcm_sample_bit_depth_luma_minus1 = sps.bit_depth_luma_minus8 + 7;
+	sps.pcm_sample_bit_depth_chroma_minus1 = sps.bit_depth_chroma_minus8 + 7;
+
+	//vps.flags.vps_temporal_id_nesting_flag = sps.flags.sps_temporal_id_nesting_flag;
+	//vps.flags.vps_sub_layer_ordering_info_present_flag = 1;
+	//vps.vps_max_sub_layers_minus1 = 0;
+
+	StdVideoH265ShortTermRefPicSet short_term_ref_pic_set = {};
+	StdVideoH265DecPicBufMgr dec_pic_buf_mgr = {};
+
+	short_term_ref_pic_set.num_negative_pics = 1;
+	short_term_ref_pic_set.used_by_curr_pic_s0_flag = 1;
+	sps.pShortTermRefPicSet = &short_term_ref_pic_set;
+	sps.pDecPicBufMgr = &dec_pic_buf_mgr;
+
+	vps.pProfileTierLevel = &level;
+	vps.pDecPicBufMgr = &dec_pic_buf_mgr;
+
+	pps.flags.cabac_init_present_flag = 1;
+	pps.flags.transform_skip_enabled_flag = 1;
+	pps.flags.cu_qp_delta_enabled_flag = 1;
+	pps.flags.transquant_bypass_enabled_flag = impl.info.hints.tuning == VK_VIDEO_ENCODE_TUNING_MODE_LOSSLESS_KHR ? 1 : 0;
+	pps.flags.pps_loop_filter_across_slices_enabled_flag = 1;
+	pps.flags.deblocking_filter_control_present_flag = 1;
+
+	add_info.pStdPPSs = &pps;
+	add_info.pStdSPSs = &sps;
+	add_info.pStdVPSs = &vps;
+	add_info.stdPPSCount = 1;
+	add_info.stdSPSCount = 1;
+	add_info.stdVPSCount = 1;
+
+	h265_session_param_info.pParametersAddInfo = &add_info;
+	session_param_info.pNext = &h265_session_param_info;
+	session_param_info.videoSession = impl.session.session;
+
+	auto &table = impl.table;
+
+	// Simple rounding to nearest quality level.
+	quality_level.qualityLevel = uint32_t(saturate(impl.info.quality_level) *
+	                                      float(impl.caps.encode_caps.maxQualityLevels - 1) + 0.5f);
+	h265_session_param_info.pNext = &quality_level;
+
+	// Query some properties for the quality level we chose.
+	VkPhysicalDeviceVideoEncodeQualityLevelInfoKHR quality_level_info =
+		{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VIDEO_ENCODE_QUALITY_LEVEL_INFO_KHR };
+	quality_level_info.pVideoProfile = &impl.profile.profile_info;
+	quality_level_info.qualityLevel = quality_level.qualityLevel;
+	h265.quality_level_props = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_H265_QUALITY_LEVEL_PROPERTIES_KHR };
+	quality_level_props.pNext = &h265.quality_level_props;
+	VK_CALL(vkGetPhysicalDeviceVideoEncodeQualityLevelPropertiesKHR(impl.info.gpu, &quality_level_info,
+	                                                                &quality_level_props));
+
+	if (VK_CALL(vkCreateVideoSessionParametersKHR(impl.info.device, &session_param_info,
+	                                              nullptr, &params)) != VK_SUCCESS)
+	{
+		params = VK_NULL_HANDLE;
+		return false;
+	}
+
+	VkVideoEncodeSessionParametersGetInfoKHR params_get_info =
+		{ VK_STRUCTURE_TYPE_VIDEO_ENCODE_SESSION_PARAMETERS_GET_INFO_KHR };
+	VkVideoEncodeH265SessionParametersGetInfoKHR h265_params_get_info =
+		{ VK_STRUCTURE_TYPE_VIDEO_ENCODE_H265_SESSION_PARAMETERS_GET_INFO_KHR };
+	VkVideoEncodeSessionParametersFeedbackInfoKHR feedback_info =
+		{ VK_STRUCTURE_TYPE_VIDEO_ENCODE_SESSION_PARAMETERS_FEEDBACK_INFO_KHR };
+	VkVideoEncodeH265SessionParametersFeedbackInfoKHR h265_feedback_info =
+		{ VK_STRUCTURE_TYPE_VIDEO_ENCODE_H265_SESSION_PARAMETERS_FEEDBACK_INFO_KHR };
+	params_get_info.pNext = &h265_params_get_info;
+	feedback_info.pNext = &h265_feedback_info;
+
+	params_get_info.videoSessionParameters = params;
+	h265_params_get_info.writeStdPPS = VK_TRUE;
+	h265_params_get_info.writeStdSPS = VK_TRUE;
+	h265_params_get_info.writeStdVPS = VK_TRUE;
+
+	encoded_parameters.resize(256);
+	size_t params_size = encoded_parameters.size();
+	auto res = VK_CALL(vkGetEncodedVideoSessionParametersKHR(
+			impl.info.device, &params_get_info,
+			&feedback_info, &params_size, encoded_parameters.data()));
+
+	if (res != VK_SUCCESS)
+	{
+		VK_CALL(vkDestroyVideoSessionParametersKHR(impl.info.device, params, nullptr));
+		params = VK_NULL_HANDLE;
+	}
+
+	encoded_parameters.resize(params_size);
+	return true;
 }
 
 bool VideoSessionParameters::init_h264(Encoder::Impl &impl)
@@ -2070,18 +2444,6 @@ RateControl::RateControl()
 
 bool RateControl::init(Encoder::Impl &impl)
 {
-	bool is_h264;
-
-	switch (impl.info.profile)
-	{
-	case Profile::H264_High:
-		is_h264 = true;
-		break;
-
-	default:
-		return false;
-	}
-
 	ctrl_info.pNext = &rate_info;
 	ctrl_info.flags = VK_VIDEO_CODING_CONTROL_RESET_BIT_KHR |
 	                  VK_VIDEO_CODING_CONTROL_ENCODE_RATE_CONTROL_BIT_KHR;
@@ -2134,7 +2496,7 @@ bool RateControl::init(Encoder::Impl &impl)
 		if (rate_info.rateControlMode == VK_VIDEO_ENCODE_RATE_CONTROL_MODE_CBR_BIT_KHR)
 			layer.maxBitrate = layer.averageBitrate;
 
-		if (is_h264)
+		if (impl.info.profile == Profile::H264_High)
 		{
 			rate_info.pNext = &h264.rate_control;
 			layer.pNext = &h264.layer;
@@ -2180,18 +2542,42 @@ bool RateControl::init(Encoder::Impl &impl)
 			h264.layer.maxFrameSize.frameISize = MaxPayloadSize;
 			h264.layer.maxFrameSize.framePSize = MaxPayloadSize;
 			h264.layer.maxFrameSize.frameBSize = MaxPayloadSize;
+		}
+		else if (impl.info.profile == Profile::H265_Main)
+		{
+			rate_info.pNext = &h265.rate_control;
+			layer.pNext = &h265.layer;
 
-#if 0
-			// This probably isn't needed?
-			h264.layer.useMinQp = VK_TRUE;
-			h264.layer.useMaxQp = VK_TRUE;
-			h264.layer.minQp.qpI = 18;
-			h264.layer.maxQp.qpI = 34;
-			h264.layer.minQp.qpP = 22;
-			h264.layer.maxQp.qpP = 38;
-			h264.layer.minQp.qpB = 24;
-			h264.layer.maxQp.qpB = 40;
-#endif
+			h265.rate_control = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_H265_RATE_CONTROL_INFO_KHR };
+			h265.layer = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_H265_RATE_CONTROL_LAYER_INFO_KHR };
+
+			// If GOP is invalid, override it with some sensible defaults.
+			if (info.gop_frames == 0)
+				info.gop_frames = impl.session_params.h265.quality_level_props.preferredGopFrameCount;
+			if (info.gop_frames == 0)
+				info.gop_frames = 1;
+
+			h265.rate_control.consecutiveBFrameCount = 0;
+			h265.rate_control.idrPeriod = info.gop_frames;
+			h265.rate_control.gopFrameCount = info.gop_frames;
+
+			// When we start using intra-refresh, we cannot use these.
+			if ((impl.session_params.h265.quality_level_props.preferredRateControlFlags &
+			     VK_VIDEO_ENCODE_H265_RATE_CONTROL_REFERENCE_PATTERN_FLAT_BIT_KHR) != 0)
+			{
+				h265.rate_control.flags |= VK_VIDEO_ENCODE_H265_RATE_CONTROL_REGULAR_GOP_BIT_KHR |
+				                           VK_VIDEO_ENCODE_H265_RATE_CONTROL_REFERENCE_PATTERN_FLAT_BIT_KHR;
+			}
+			else if ((impl.session_params.h265.quality_level_props.preferredRateControlFlags &
+			          VK_VIDEO_ENCODE_H265_RATE_CONTROL_REGULAR_GOP_BIT_KHR) != 0)
+			{
+				h265.rate_control.flags |= VK_VIDEO_ENCODE_H265_RATE_CONTROL_REGULAR_GOP_BIT_KHR;
+			}
+
+			h265.layer.useMaxFrameSize = VK_TRUE;
+			h265.layer.maxFrameSize.frameISize = MaxPayloadSize;
+			h265.layer.maxFrameSize.framePSize = MaxPayloadSize;
+			h265.layer.maxFrameSize.frameBSize = MaxPayloadSize;
 		}
 	}
 
