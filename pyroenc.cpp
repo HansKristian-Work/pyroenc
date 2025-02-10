@@ -264,6 +264,7 @@ struct Encoder::Impl
 	struct Dpb
 	{
 		Image dpb[DPBSize];
+		Image array_dpb;
 		Image luma;
 		Image chroma;
 		bool dpb_inited = false;
@@ -280,7 +281,8 @@ struct Encoder::Impl
 	bool allocate_memory(Memory &memory, VkMemoryPropertyFlags props, const VkMemoryRequirements &reqs);
 	bool create_buffer(Buffer &buffer, VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags props,
 	                   const void *pNext);
-	bool create_image(Image &image, uint32_t width, uint32_t height, VkFormat format, VkImageUsageFlags usage,
+	bool create_image(Image &image, uint32_t width, uint32_t height, uint32_t layers,
+	                  VkFormat format, VkImageUsageFlags usage,
 	                  const void *pNext);
 	bool create_timeline_semaphore(Timeline &timeline);
 	bool create_compute_pipeline(Pipeline &pipeline, const uint32_t *code, size_t code_size,
@@ -310,7 +312,7 @@ struct Encoder::Impl
 	RateControl rate;
 };
 
-bool Encoder::Impl::create_image(Image &image, uint32_t width, uint32_t height, VkFormat format,
+bool Encoder::Impl::create_image(Image &image, uint32_t width, uint32_t height, uint32_t layers, VkFormat format,
                                  VkImageUsageFlags usage, const void *pNext)
 {
 	image = {};
@@ -323,7 +325,7 @@ bool Encoder::Impl::create_image(Image &image, uint32_t width, uint32_t height, 
 	image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
 	image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 	image_info.mipLevels = 1;
-	image_info.arrayLayers = 1;
+	image_info.arrayLayers = layers;
 	image_info.samples = VK_SAMPLE_COUNT_1_BIT;
 	image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 	image_info.pNext = pNext;
@@ -345,8 +347,8 @@ bool Encoder::Impl::create_image(Image &image, uint32_t width, uint32_t height, 
 
 	VkImageViewCreateInfo view_info = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
 	view_info.format = format;
-	view_info.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-	view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+	view_info.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, VK_REMAINING_ARRAY_LAYERS };
+	view_info.viewType = layers > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
 	view_info.image = image.image;
 
 	if (VK_CALL(vkCreateImageView(info.device, &view_info, nullptr, &image.view)) != VK_SUCCESS)
@@ -771,21 +773,33 @@ bool Encoder::Impl::init_dpb_resources()
 	uint32_t aligned_width = caps.get_aligned_width(info.width);
 	uint32_t aligned_height = caps.get_aligned_height(info.height);
 
-	for (auto &img : dpb.dpb)
+	if ((caps.video_caps.flags & VK_VIDEO_CAPABILITY_SEPARATE_REFERENCE_IMAGES_BIT_KHR) != 0)
 	{
-		if (!create_image(img, aligned_width, aligned_height, profile.dpb.format,
+		// Could just use the array DPB formulation everywhere, but NV drivers are still bugged as of 570 series :(
+		for (auto &img: dpb.dpb)
+		{
+			if (!create_image(img, aligned_width, aligned_height, 1, profile.dpb.format,
+			                  VK_IMAGE_USAGE_VIDEO_ENCODE_DPB_BIT_KHR,
+			                  &profile.profile_list))
+				return false;
+		}
+	}
+	else
+	{
+		if (!create_image(dpb.array_dpb, aligned_width, aligned_height, DPBSize, profile.dpb.format,
 		                  VK_IMAGE_USAGE_VIDEO_ENCODE_DPB_BIT_KHR,
 		                  &profile.profile_list))
 			return false;
 	}
 
-	if (!create_image(dpb.luma, aligned_width, aligned_height, profile.input.luma_format,
+	if (!create_image(dpb.luma, aligned_width, aligned_height, 1, profile.input.luma_format,
 					  VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT, nullptr))
 		return false;
 
 	if (!create_image(dpb.chroma,
 	                  aligned_width >> profile.input.subsample_log2[0],
 	                  aligned_height >> profile.input.subsample_log2[1],
+	                  1,
 	                  profile.input.chroma_format,
 	                  VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT, nullptr))
 		return false;
@@ -1268,9 +1282,20 @@ bool Encoder::Impl::record_and_submit_encode(VkCommandBuffer cmd, Frame &frame, 
 	H264EncodeInfo h264;
 	H265EncodeInfo h265;
 
-	reconstructed_slot_pic.imageViewBinding = dpb.dpb[dpb_index_reconstructed].view;
+	if (dpb.array_dpb.image)
+	{
+		reconstructed_slot_pic.imageViewBinding = dpb.array_dpb.view;
+		reference_slot_pic.imageViewBinding = dpb.array_dpb.view;
+		reconstructed_slot_pic.baseArrayLayer = dpb_index_reconstructed;
+		reference_slot_pic.baseArrayLayer = dpb_index_reference;
+	}
+	else
+	{
+		reconstructed_slot_pic.imageViewBinding = dpb.dpb[dpb_index_reconstructed].view;
+		reference_slot_pic.imageViewBinding = dpb.dpb[dpb_index_reference].view;
+	}
+
 	reconstructed_slot_pic.codedExtent = coded_extent;
-	reference_slot_pic.imageViewBinding = dpb.dpb[dpb_index_reference].view;
 	reference_slot_pic.codedExtent = coded_extent;
 
 	init_slots[0].sType = VK_STRUCTURE_TYPE_VIDEO_REFERENCE_SLOT_INFO_KHR;
@@ -1348,14 +1373,15 @@ void Encoder::Impl::record_dpb_barrier(VkCommandBuffer cmd)
 {
 	VkDependencyInfo deps = { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
 	VkImageMemoryBarrier2 barriers[DPBSize];
-	deps.imageMemoryBarrierCount = DPBSize;
 	deps.pImageMemoryBarriers = barriers;
 
-	for (uint32_t i = 0; i < DPBSize; i++)
+	if (dpb.array_dpb.image)
 	{
-		auto &barrier = barriers[i];
+		deps.imageMemoryBarrierCount = 1;
+
+		auto &barrier = barriers[0];
 		barrier = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2 };
-		barrier.image = dpb.dpb[i].image;
+		barrier.image = dpb.array_dpb.image;
 		barrier.srcStageMask = VK_PIPELINE_STAGE_NONE;
 		barrier.srcAccessMask = VK_ACCESS_NONE;
 		barrier.dstStageMask = VK_PIPELINE_STAGE_2_VIDEO_ENCODE_BIT_KHR;
@@ -1363,7 +1389,26 @@ void Encoder::Impl::record_dpb_barrier(VkCommandBuffer cmd)
 		                        VK_ACCESS_2_VIDEO_ENCODE_WRITE_BIT_KHR;
 		barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 		barrier.newLayout = VK_IMAGE_LAYOUT_VIDEO_ENCODE_DPB_KHR;
-		barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+		barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, VK_REMAINING_ARRAY_LAYERS };
+	}
+	else
+	{
+		deps.imageMemoryBarrierCount = DPBSize;
+
+		for (uint32_t i = 0; i < DPBSize; i++)
+		{
+			auto &barrier = barriers[i];
+			barrier = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2 };
+			barrier.image = dpb.dpb[i].image;
+			barrier.srcStageMask = VK_PIPELINE_STAGE_NONE;
+			barrier.srcAccessMask = VK_ACCESS_NONE;
+			barrier.dstStageMask = VK_PIPELINE_STAGE_2_VIDEO_ENCODE_BIT_KHR;
+			barrier.dstAccessMask = VK_ACCESS_2_VIDEO_ENCODE_READ_BIT_KHR |
+			                        VK_ACCESS_2_VIDEO_ENCODE_WRITE_BIT_KHR;
+			barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+			barrier.newLayout = VK_IMAGE_LAYOUT_VIDEO_ENCODE_DPB_KHR;
+			barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+		}
 	}
 
 	VK_CALL(vkCmdPipelineBarrier2(cmd, &deps));
@@ -1527,6 +1572,7 @@ void Encoder::Impl::destroy_dpb()
 {
 	for (auto &img : dpb.dpb)
 		destroy_image(img);
+	destroy_image(dpb.array_dpb);
 	destroy_image(dpb.luma);
 	destroy_image(dpb.chroma);
 }
@@ -1545,7 +1591,7 @@ bool Encoder::Impl::init_frame_resource(Frame &frame)
 	uint32_t aligned_width = caps.get_aligned_width(info.width);
 	uint32_t aligned_height = caps.get_aligned_height(info.height);
 
-	if (!create_image(frame.image_ycbcr, aligned_width, aligned_height, profile.input.format,
+	if (!create_image(frame.image_ycbcr, aligned_width, aligned_height, 1, profile.input.format,
 	                  VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR,
 					  &profile.profile_list))
 		return false;
