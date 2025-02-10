@@ -2175,10 +2175,14 @@ bool VideoSessionParameters::init_h265(Encoder::Impl &impl)
 	level.flags.general_frame_only_constraint_flag = 1;
 	level.flags.general_tier_flag = 1;
 
-	//sps.flags.sps_temporal_id_nesting_flag = 1;
-	//sps.flags.sps_sub_layer_ordering_info_present_flag = 1;
+	auto syntax_flags = impl.caps.h265.caps.stdSyntaxFlags;
+
+	if ((syntax_flags & VK_VIDEO_ENCODE_H265_STD_SAMPLE_ADAPTIVE_OFFSET_ENABLED_FLAG_SET_BIT_KHR) != 0)
+		sps.flags.sample_adaptive_offset_enabled_flag = 1;
+	if ((syntax_flags & VK_VIDEO_ENCODE_H265_STD_PCM_ENABLED_FLAG_SET_BIT_KHR) != 0)
+		sps.flags.pcm_enabled_flag = 1;
+
 	sps.flags.amp_enabled_flag = 1;
-	sps.flags.sample_adaptive_offset_enabled_flag = 1;
 
 	uint32_t ctb_min_size = 1u << (find_lsb(impl.caps.h265.caps.ctbSizes) + 4);
 	uint32_t aligned_width = (impl.info.width + ctb_min_size - 1) & ~(ctb_min_size - 1);
@@ -2215,10 +2219,6 @@ bool VideoSessionParameters::init_h265(Encoder::Impl &impl)
 	sps.pcm_sample_bit_depth_luma_minus1 = sps.bit_depth_luma_minus8 + 7;
 	sps.pcm_sample_bit_depth_chroma_minus1 = sps.bit_depth_chroma_minus8 + 7;
 
-	//vps.flags.vps_temporal_id_nesting_flag = sps.flags.sps_temporal_id_nesting_flag;
-	//vps.flags.vps_sub_layer_ordering_info_present_flag = 1;
-	//vps.vps_max_sub_layers_minus1 = 0;
-
 	StdVideoH265ShortTermRefPicSet short_term_ref_pic_set = {};
 	StdVideoH265DecPicBufMgr dec_pic_buf_mgr = {};
 
@@ -2230,12 +2230,16 @@ bool VideoSessionParameters::init_h265(Encoder::Impl &impl)
 	vps.pProfileTierLevel = &level;
 	vps.pDecPicBufMgr = &dec_pic_buf_mgr;
 
-	pps.flags.cabac_init_present_flag = 1;
-	pps.flags.transform_skip_enabled_flag = 1;
-	pps.flags.cu_qp_delta_enabled_flag = 1;
-	pps.flags.transquant_bypass_enabled_flag = impl.info.hints.tuning == VK_VIDEO_ENCODE_TUNING_MODE_LOSSLESS_KHR ? 1 : 0;
-	pps.flags.pps_loop_filter_across_slices_enabled_flag = 1;
+	if ((syntax_flags & VK_VIDEO_ENCODE_H265_STD_TRANSFORM_SKIP_ENABLED_FLAG_SET_BIT_KHR) != 0 ||
+		(syntax_flags & VK_VIDEO_ENCODE_H265_STD_TRANSFORM_SKIP_ENABLED_FLAG_UNSET_BIT_KHR) == 0)
+		pps.flags.transform_skip_enabled_flag = 1;
+
+	if ((syntax_flags & VK_VIDEO_ENCODE_H265_STD_TRANSQUANT_BYPASS_ENABLED_FLAG_SET_BIT_KHR) != 0)
+		pps.flags.transquant_bypass_enabled_flag = impl.info.hints.tuning == VK_VIDEO_ENCODE_TUNING_MODE_LOSSLESS_KHR ? 1 : 0;
+
 	pps.flags.deblocking_filter_control_present_flag = 1;
+	pps.flags.cu_qp_delta_enabled_flag = 1;
+	pps.flags.cabac_init_present_flag = 1;
 
 	add_info.pStdPPSs = &pps;
 	add_info.pStdSPSs = &sps;
