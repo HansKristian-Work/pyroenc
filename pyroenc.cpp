@@ -1943,17 +1943,22 @@ bool VideoEncoderCaps::setup(Encoder::Impl &impl)
 {
 	auto &table = impl.table;
 	video_caps.pNext = &encode_caps;
+	uint32_t block_alignment = 0;
 
 	switch (impl.info.profile)
 	{
 	case Profile::H264_High:
 		h264.caps = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_CAPABILITIES_KHR };
 		encode_caps.pNext = &h264.caps;
+		// 16x16 macroblocks.
+		block_alignment = 16;
 		break;
 
 	case Profile::H265_Main:
 		h265.caps = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_H265_CAPABILITIES_KHR };
 		encode_caps.pNext = &h265.caps;
+		// Force alignment to the largest possible CTB.
+		block_alignment = 64;
 		break;
 
 	default:
@@ -1970,6 +1975,9 @@ bool VideoEncoderCaps::setup(Encoder::Impl &impl)
 	{
 		return false;
 	}
+
+	video_caps.pictureAccessGranularity.width = std::max<uint32_t>(video_caps.pictureAccessGranularity.width, block_alignment);
+	video_caps.pictureAccessGranularity.height = std::max<uint32_t>(video_caps.pictureAccessGranularity.height, block_alignment);
 
 	return true;
 }
@@ -2202,14 +2210,18 @@ bool VideoSessionParameters::init_h265(Encoder::Impl &impl)
 	// This is arbitrary.
 	sps.log2_max_pic_order_cnt_lsb_minus4 = 4;
 
-	sps.log2_min_luma_coding_block_size_minus3 = find_lsb(caps.ctbSizes) + 4 - 3;
-	sps.log2_diff_max_min_luma_coding_block_size = find_msb(caps.ctbSizes) - find_lsb(caps.ctbSizes);
+	// This is *not* the minimum ctbSizes. Force this to 8x8, otherwise stuff breaks since it's the minimum per spec.
+	// CB size != CTB size! I spent a full day on debugging this :(
+	sps.log2_min_luma_coding_block_size_minus3 = 0;
+	sps.log2_diff_max_min_luma_coding_block_size = find_msb(caps.ctbSizes) + 1; // First bit is 16x16.
 	sps.log2_min_luma_transform_block_size_minus2 = find_lsb(caps.transformBlockSizes);
 	sps.log2_diff_max_min_luma_transform_block_size =
 			find_msb(caps.transformBlockSizes) - find_lsb(caps.transformBlockSizes);
 
-	sps.max_transform_hierarchy_depth_inter = (find_msb(caps.ctbSizes) + 4) - (find_lsb(caps.transformBlockSizes) + 2);
-	sps.max_transform_hierarchy_depth_intra = sps.max_transform_hierarchy_depth_inter;
+	// First bit for transformBlockSize is 4x4.
+	uint32_t max_transform_hierarchy = (find_msb(caps.ctbSizes) + 4) - (find_lsb(caps.transformBlockSizes) + 2);
+	sps.max_transform_hierarchy_depth_inter = max_transform_hierarchy;
+	sps.max_transform_hierarchy_depth_intra = max_transform_hierarchy;
 
 	StdVideoH265ShortTermRefPicSet short_term_ref_pic_set = {};
 	StdVideoH265DecPicBufMgr dec_pic_buf_mgr = {};
