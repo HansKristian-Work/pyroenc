@@ -1185,9 +1185,7 @@ void H265EncodeInfo::setup(
 
 	pic.flags.IrapPicFlag = is_idr ? 1 : 0;
 	pic.flags.is_reference = 1;
-	pic.flags.pic_output_flag = 1;
 	pic.flags.short_term_ref_pic_set_sps_flag = 1;
-	pic.flags.no_output_of_prior_pics_flag = is_idr && rate.idr_pic_id ? 1 : 0;
 	pic.pRefLists = &ref_lists;
 
 	if (is_idr)
@@ -1197,10 +1195,11 @@ void H265EncodeInfo::setup(
 	slice_header.slice_type = is_idr ? STD_VIDEO_H265_SLICE_TYPE_I : STD_VIDEO_H265_SLICE_TYPE_P;
 	slice_header.MaxNumMergeCand = 5;
 	slice_header.flags.first_slice_segment_in_pic_flag = 1;
-	slice_header.flags.slice_sao_chroma_flag = 1;
-	slice_header.flags.slice_sao_luma_flag = 1;
-	slice_header.flags.cu_chroma_qp_offset_enabled_flag = 1;
-	slice_header.flags.deblocking_filter_override_flag = 1;
+	if ((caps.h265.caps.stdSyntaxFlags & VK_VIDEO_ENCODE_H265_STD_SAMPLE_ADAPTIVE_OFFSET_ENABLED_FLAG_SET_BIT_KHR) != 0)
+	{
+		slice_header.flags.slice_sao_chroma_flag = 1;
+		slice_header.flags.slice_sao_luma_flag = 1;
+	}
 
 	if (rate.rate_info.rateControlMode == VK_VIDEO_ENCODE_RATE_CONTROL_MODE_DISABLED_BIT_KHR)
 	{
@@ -2106,6 +2105,9 @@ bool VideoSessionParameters::init_h265(Encoder::Impl &impl)
 		{ VK_STRUCTURE_TYPE_VIDEO_SESSION_PARAMETERS_CREATE_INFO_KHR };
 	VkVideoEncodeH265SessionParametersCreateInfoKHR h265_session_param_info =
 		{ VK_STRUCTURE_TYPE_VIDEO_ENCODE_H265_SESSION_PARAMETERS_CREATE_INFO_KHR };
+	VkVideoEncodeH265SessionParametersAddInfoKHR add_info =
+		{ VK_STRUCTURE_TYPE_VIDEO_ENCODE_H265_SESSION_PARAMETERS_ADD_INFO_KHR };
+
 	h265_session_param_info.maxStdPPSCount = 1;
 	h265_session_param_info.maxStdSPSCount = 1;
 	h265_session_param_info.maxStdVPSCount = 1;
@@ -2120,10 +2122,7 @@ bool VideoSessionParameters::init_h265(Encoder::Impl &impl)
 	vps = {};
 	vui = {};
 
-	sps.flags.vui_parameters_present_flag = 1;
-	sps.pSequenceParameterSetVui = &vui;
-	sps.num_short_term_ref_pic_sets = 1;
-
+	// VUI
 	vui.flags.aspect_ratio_info_present_flag = 1;
 	// Aspect ratio of pixels (SAR), not actual aspect ratio. Confusing, I know.
 	vui.aspect_ratio_idc = STD_VIDEO_H265_ASPECT_RATIO_IDC_SQUARE;
@@ -2135,8 +2134,6 @@ bool VideoSessionParameters::init_h265(Encoder::Impl &impl)
 	vui.flags.video_signal_type_present_flag = 1;
 	vui.flags.video_full_range_flag = 0;
 	vui.flags.colour_description_present_flag = 1;
-	vui.flags.motion_vectors_over_pic_boundaries_flag = 1;
-	vui.flags.restricted_ref_pic_lists_flag = 1;
 
 	vui.flags.vui_timing_info_present_flag = 1;
 	vui.vui_num_units_in_tick = impl.info.frame_rate_den;
@@ -2146,11 +2143,10 @@ bool VideoSessionParameters::init_h265(Encoder::Impl &impl)
 	vui.colour_primaries = 1; // BT.709
 	vui.transfer_characteristics = 1; // BT.709
 	vui.matrix_coeffs = 1; // BT.709
-	VkVideoEncodeH265SessionParametersAddInfoKHR add_info =
-		{ VK_STRUCTURE_TYPE_VIDEO_ENCODE_H265_SESSION_PARAMETERS_ADD_INFO_KHR };
 
-	vui.log2_max_mv_length_horizontal = 10;
-	vui.log2_max_mv_length_vertical = 10;
+	sps.flags.vui_parameters_present_flag = 1;
+	sps.pSequenceParameterSetVui = &vui;
+	sps.num_short_term_ref_pic_sets = 1;
 
 	if (impl.profile.profile_info.chromaSubsampling == VK_VIDEO_CHROMA_SUBSAMPLING_420_BIT_KHR)
 		sps.chroma_format_idc = STD_VIDEO_H265_CHROMA_FORMAT_IDC_420;
@@ -2167,24 +2163,25 @@ bool VideoSessionParameters::init_h265(Encoder::Impl &impl)
 		sps.bit_depth_chroma_minus8 = 2;
 	}
 
+	auto &caps = impl.caps.h265.caps;
+
 	StdVideoH265ProfileTierLevel level = {};
-	level.general_level_idc = impl.caps.h265.caps.maxLevelIdc;
+	level.general_level_idc = std::min<StdVideoH265LevelIdc>(caps.maxLevelIdc, STD_VIDEO_H265_LEVEL_IDC_6_1);
 	level.general_profile_idc = impl.profile.h265.profile.stdProfileIdc;
 	sps.pProfileTierLevel = &level;
 	level.flags.general_progressive_source_flag = 1;
 	level.flags.general_frame_only_constraint_flag = 1;
-	level.flags.general_tier_flag = 1;
+	level.flags.general_tier_flag = level.general_level_idc >= STD_VIDEO_H265_LEVEL_IDC_5_0;
 
-	auto syntax_flags = impl.caps.h265.caps.stdSyntaxFlags;
+	auto syntax_flags = caps.stdSyntaxFlags;
 
 	if ((syntax_flags & VK_VIDEO_ENCODE_H265_STD_SAMPLE_ADAPTIVE_OFFSET_ENABLED_FLAG_SET_BIT_KHR) != 0)
 		sps.flags.sample_adaptive_offset_enabled_flag = 1;
-	if ((syntax_flags & VK_VIDEO_ENCODE_H265_STD_PCM_ENABLED_FLAG_SET_BIT_KHR) != 0)
-		sps.flags.pcm_enabled_flag = 1;
 
 	sps.flags.amp_enabled_flag = 1;
+	sps.flags.strong_intra_smoothing_enabled_flag = 1;
 
-	uint32_t ctb_min_size = 1u << (find_lsb(impl.caps.h265.caps.ctbSizes) + 4);
+	uint32_t ctb_min_size = 1u << (find_lsb(caps.ctbSizes) + 4);
 	uint32_t aligned_width = (impl.info.width + ctb_min_size - 1) & ~(ctb_min_size - 1);
 	uint32_t aligned_height = (impl.info.height + ctb_min_size - 1) & ~(ctb_min_size - 1);
 
@@ -2205,25 +2202,22 @@ bool VideoSessionParameters::init_h265(Encoder::Impl &impl)
 	// This is arbitrary.
 	sps.log2_max_pic_order_cnt_lsb_minus4 = 4;
 
-	sps.log2_min_luma_transform_block_size_minus2 = find_lsb(impl.caps.h265.caps.transformBlockSizes);
-	sps.log2_diff_max_min_luma_transform_block_size = find_msb(impl.caps.h265.caps.transformBlockSizes) - find_lsb(impl.caps.h265.caps.transformBlockSizes);
+	sps.log2_min_luma_coding_block_size_minus3 = find_lsb(caps.ctbSizes) + 4 - 3;
+	sps.log2_diff_max_min_luma_coding_block_size = find_msb(caps.ctbSizes) - find_lsb(caps.ctbSizes);
+	sps.log2_min_luma_transform_block_size_minus2 = find_lsb(caps.transformBlockSizes);
+	sps.log2_diff_max_min_luma_transform_block_size =
+			find_msb(caps.transformBlockSizes) - find_lsb(caps.transformBlockSizes);
 
-	sps.max_transform_hierarchy_depth_inter = (find_msb(impl.caps.h265.caps.ctbSizes) + 4) - (find_lsb(impl.caps.h265.caps.transformBlockSizes) + 2);
+	sps.max_transform_hierarchy_depth_inter = (find_msb(caps.ctbSizes) + 4) - (find_lsb(caps.transformBlockSizes) + 2);
 	sps.max_transform_hierarchy_depth_intra = sps.max_transform_hierarchy_depth_inter;
-
-	sps.log2_min_pcm_luma_coding_block_size_minus3 = find_lsb(impl.caps.h265.caps.ctbSizes) + 4 - 3;
-	sps.log2_diff_max_min_luma_coding_block_size = find_msb(impl.caps.h265.caps.ctbSizes) - find_lsb(impl.caps.h265.caps.ctbSizes);
-	sps.log2_min_luma_coding_block_size_minus3 = sps.log2_min_pcm_luma_coding_block_size_minus3;
-	sps.log2_diff_max_min_pcm_luma_coding_block_size = sps.log2_diff_max_min_pcm_luma_coding_block_size;
-
-	sps.pcm_sample_bit_depth_luma_minus1 = sps.bit_depth_luma_minus8 + 7;
-	sps.pcm_sample_bit_depth_chroma_minus1 = sps.bit_depth_chroma_minus8 + 7;
 
 	StdVideoH265ShortTermRefPicSet short_term_ref_pic_set = {};
 	StdVideoH265DecPicBufMgr dec_pic_buf_mgr = {};
 
 	short_term_ref_pic_set.num_negative_pics = 1;
+	short_term_ref_pic_set.use_delta_flag = 1;
 	short_term_ref_pic_set.used_by_curr_pic_s0_flag = 1;
+	short_term_ref_pic_set.used_by_curr_pic_flag = 1;
 	sps.pShortTermRefPicSet = &short_term_ref_pic_set;
 	sps.pDecPicBufMgr = &dec_pic_buf_mgr;
 
@@ -2233,13 +2227,16 @@ bool VideoSessionParameters::init_h265(Encoder::Impl &impl)
 	if ((syntax_flags & VK_VIDEO_ENCODE_H265_STD_TRANSFORM_SKIP_ENABLED_FLAG_SET_BIT_KHR) != 0 ||
 		(syntax_flags & VK_VIDEO_ENCODE_H265_STD_TRANSFORM_SKIP_ENABLED_FLAG_UNSET_BIT_KHR) == 0)
 		pps.flags.transform_skip_enabled_flag = 1;
-
 	if ((syntax_flags & VK_VIDEO_ENCODE_H265_STD_TRANSQUANT_BYPASS_ENABLED_FLAG_SET_BIT_KHR) != 0)
 		pps.flags.transquant_bypass_enabled_flag = impl.info.hints.tuning == VK_VIDEO_ENCODE_TUNING_MODE_LOSSLESS_KHR ? 1 : 0;
+	if ((caps.stdSyntaxFlags & VK_VIDEO_ENCODE_H265_STD_CONSTRAINED_INTRA_PRED_FLAG_SET_BIT_KHR) != 0)
+		pps.flags.constrained_intra_pred_flag = 1;
 
 	pps.flags.deblocking_filter_control_present_flag = 1;
-	pps.flags.cu_qp_delta_enabled_flag = 1;
 	pps.flags.cabac_init_present_flag = 1;
+
+	// This is required or NV output gets really broken.
+	pps.flags.cu_qp_delta_enabled_flag = 1;
 
 	add_info.pStdPPSs = &pps;
 	add_info.pStdSPSs = &sps;
