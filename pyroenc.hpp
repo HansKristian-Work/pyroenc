@@ -17,7 +17,8 @@ struct QueueInfo
 enum class Profile
 {
 	H264_High,
-	H265_Main
+	H265_Main,
+	H265_Main10
 };
 
 struct EncoderCreateInfo

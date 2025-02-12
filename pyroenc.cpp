@@ -964,7 +964,9 @@ bool Encoder::Impl::submit_conversion(const FrameInfo &input, Frame &frame)
 	ConversionRegisters params = {};
 	params.width = input.width;
 	params.height = input.height;
-	params.dither_strength = 1.0f / 255.0f; // TODO: Change for 10-bit.
+
+	const float dither_strength = info.profile == Profile::H265_Main10 ? 1.0f / 1023.0f : 1.0f / 255.0f;
+	params.dither_strength = dither_strength;
 
 	VK_CALL(vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, conversion_pipeline.pipeline));
 	VK_CALL(vkCmdPushConstants(cmd, conversion_pipeline.layout,
@@ -1340,6 +1342,7 @@ bool Encoder::Impl::record_and_submit_encode(VkCommandBuffer cmd, Frame &frame, 
 		break;
 
 	case Profile::H265_Main:
+	case Profile::H265_Main10:
 		h265.setup(caps, session_params, rate, video_coding_info, encode_info);
 		break;
 
@@ -1921,6 +1924,16 @@ bool VideoProfile::setup(Encoder::Impl &impl, Profile profile)
 		profile_info.pNext = &h265.profile;
 		break;
 
+	case Profile::H265_Main10:
+		h265.profile = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_H265_PROFILE_INFO_KHR };
+		profile_info.chromaSubsampling = VK_VIDEO_CHROMA_SUBSAMPLING_420_BIT_KHR;
+		profile_info.chromaBitDepth = VK_VIDEO_COMPONENT_BIT_DEPTH_10_BIT_KHR;
+		profile_info.lumaBitDepth = VK_VIDEO_COMPONENT_BIT_DEPTH_10_BIT_KHR;
+		profile_info.videoCodecOperation = VK_VIDEO_CODEC_OPERATION_ENCODE_H265_BIT_KHR;
+		h265.profile.stdProfileIdc = STD_VIDEO_H265_PROFILE_IDC_MAIN_10;
+		profile_info.pNext = &h265.profile;
+		break;
+
 	default:
 		return false;
 	}
@@ -1955,6 +1968,7 @@ bool VideoEncoderCaps::setup(Encoder::Impl &impl)
 		break;
 
 	case Profile::H265_Main:
+	case Profile::H265_Main10:
 		h265.caps = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_H265_CAPABILITIES_KHR };
 		encode_caps.pNext = &h265.caps;
 		// Force alignment to the largest possible CTB.
@@ -2068,6 +2082,7 @@ bool VideoSessionParameters::init(Encoder::Impl &impl)
 		return init_h264(impl);
 
 	case Profile::H265_Main:
+	case Profile::H265_Main10:
 		return init_h265(impl);
 
 	default:
@@ -2163,8 +2178,7 @@ bool VideoSessionParameters::init_h265(Encoder::Impl &impl)
 	else
 		sps.chroma_format_idc = STD_VIDEO_H265_CHROMA_FORMAT_IDC_444;
 
-	// TODO
-	constexpr bool is_10bit = false;
+	bool is_10bit = impl.info.profile == Profile::H265_Main10;
 	if (is_10bit)
 	{
 		sps.bit_depth_luma_minus8 = 2;
@@ -2376,14 +2390,6 @@ bool VideoSessionParameters::init_h264(Encoder::Impl &impl)
 		sps.chroma_format_idc = STD_VIDEO_H264_CHROMA_FORMAT_IDC_422;
 	else
 		sps.chroma_format_idc = STD_VIDEO_H264_CHROMA_FORMAT_IDC_444;
-
-	// TODO
-	constexpr bool is_10bit = false;
-	if (is_10bit)
-	{
-		sps.bit_depth_luma_minus8 = 2;
-		sps.bit_depth_chroma_minus8 = 2;
-	}
 
 	sps.profile_idc = impl.profile.h264.profile.stdProfileIdc;
 	sps.level_idc = impl.caps.h264.caps.maxLevelIdc;
@@ -2613,7 +2619,7 @@ bool RateControl::init(Encoder::Impl &impl)
 			h264.layer.maxFrameSize.framePSize = MaxPayloadSize;
 			h264.layer.maxFrameSize.frameBSize = MaxPayloadSize;
 		}
-		else if (impl.info.profile == Profile::H265_Main)
+		else if (impl.info.profile == Profile::H265_Main || impl.info.profile == Profile::H265_Main10)
 		{
 			rate_info.pNext = &h265.rate_control;
 			layer.pNext = &h265.layer;
