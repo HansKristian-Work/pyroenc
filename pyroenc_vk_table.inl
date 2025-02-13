@@ -1,6 +1,7 @@
 // Can be included multiple times.
 INSTANCE_FUNCTION(GetDeviceProcAddr);
 INSTANCE_FUNCTION(GetPhysicalDeviceMemoryProperties);
+INSTANCE_FUNCTION(GetPhysicalDeviceProperties2);
 INSTANCE_FUNCTION(GetPhysicalDeviceVideoFormatPropertiesKHR);
 INSTANCE_FUNCTION(GetPhysicalDeviceFormatProperties2);
 INSTANCE_FUNCTION(GetPhysicalDeviceImageFormatProperties2);

@@ -272,6 +272,7 @@ struct Encoder::Impl
 
 	EncoderCreateInfo info = {};
 	VkPhysicalDeviceMemoryProperties mem_props = {};
+	VkPhysicalDeviceVulkan12Properties vk12_props = {};
 
 	LogCallback *cb = nullptr;
 
@@ -1649,6 +1650,9 @@ bool Encoder::Impl::init_encoder(const EncoderCreateInfo &info_)
 		return false;
 
 	VK_CALL(vkGetPhysicalDeviceMemoryProperties(info.gpu, &mem_props));
+	vk12_props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES;
+	VkPhysicalDeviceProperties2 props2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &vk12_props };
+	VK_CALL(vkGetPhysicalDeviceProperties2(info.gpu, &props2));
 
 	if (!create_timeline_semaphore(compute_timeline))
 		return false;
@@ -2250,9 +2254,19 @@ bool VideoSessionParameters::init_h265(Encoder::Impl &impl)
 	vps.pProfileTierLevel = &level;
 	vps.pDecPicBufMgr = &dec_pic_buf_mgr;
 
-	if ((syntax_flags & VK_VIDEO_ENCODE_H265_STD_TRANSFORM_SKIP_ENABLED_FLAG_SET_BIT_KHR) != 0 ||
-		(syntax_flags & VK_VIDEO_ENCODE_H265_STD_TRANSFORM_SKIP_ENABLED_FLAG_UNSET_BIT_KHR) == 0)
-		pps.flags.transform_skip_enabled_flag = 1;
+	if (impl.vk12_props.driverID != VK_DRIVER_ID_MESA_RADV)
+	{
+		// RADV randomly hangs GPU if this flag is set for whatever reason.
+		// However, it exposes SET_BIT, but not UNSET_BIT, so that's confusing ...
+
+		if ((syntax_flags & VK_VIDEO_ENCODE_H265_STD_TRANSFORM_SKIP_ENABLED_FLAG_SET_BIT_KHR) != 0 ||
+		    (syntax_flags & VK_VIDEO_ENCODE_H265_STD_TRANSFORM_SKIP_ENABLED_FLAG_UNSET_BIT_KHR) == 0)
+		{
+			pps.flags.transform_skip_enabled_flag = 1;
+			pps.log2_max_transform_skip_block_size_minus2 = find_msb(caps.transformBlockSizes);
+		}
+	}
+
 	if ((syntax_flags & VK_VIDEO_ENCODE_H265_STD_TRANSQUANT_BYPASS_ENABLED_FLAG_SET_BIT_KHR) != 0)
 		pps.flags.transquant_bypass_enabled_flag = impl.info.hints.tuning == VK_VIDEO_ENCODE_TUNING_MODE_LOSSLESS_KHR ? 1 : 0;
 	if ((caps.stdSyntaxFlags & VK_VIDEO_ENCODE_H265_STD_CONSTRAINED_INTRA_PRED_FLAG_SET_BIT_KHR) != 0)
