@@ -1054,6 +1054,7 @@ struct H265EncodeInfo
 
 	VkVideoEncodeH265DpbSlotInfoKHR h265_prev_ref_slot = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_H265_DPB_SLOT_INFO_KHR };
 	StdVideoEncodeH265ReferenceInfo h265_prev_ref = {};
+	StdVideoH265ShortTermRefPicSet short_term_ref_pic_set = {};
 
 	VkVideoEncodeH265GopRemainingFrameInfoKHR gop_remaining =
 		{ VK_STRUCTURE_TYPE_VIDEO_ENCODE_H265_GOP_REMAINING_FRAME_INFO_KHR };
@@ -1188,8 +1189,13 @@ void H265EncodeInfo::setup(
 
 	pic.flags.IrapPicFlag = is_idr ? 1 : 0;
 	pic.flags.is_reference = 1;
-	pic.flags.short_term_ref_pic_set_sps_flag = 1;
 	pic.pRefLists = &ref_lists;
+
+	short_term_ref_pic_set.num_negative_pics = 1;
+	short_term_ref_pic_set.use_delta_flag = 1;
+	short_term_ref_pic_set.used_by_curr_pic_s0_flag = 1;
+	short_term_ref_pic_set.used_by_curr_pic_flag = 1;
+	pic.pShortTermRefPicSet = &short_term_ref_pic_set;
 
 	if (is_idr)
 		rate.idr_pic_id++;
@@ -2173,7 +2179,6 @@ bool VideoSessionParameters::init_h265(Encoder::Impl &impl)
 
 	sps.flags.vui_parameters_present_flag = 1;
 	sps.pSequenceParameterSetVui = &vui;
-	sps.num_short_term_ref_pic_sets = 1;
 
 	if (impl.profile.profile_info.chromaSubsampling == VK_VIDEO_CHROMA_SUBSAMPLING_420_BIT_KHR)
 		sps.chroma_format_idc = STD_VIDEO_H265_CHROMA_FORMAT_IDC_420;
@@ -2241,14 +2246,10 @@ bool VideoSessionParameters::init_h265(Encoder::Impl &impl)
 	sps.max_transform_hierarchy_depth_inter = max_transform_hierarchy;
 	sps.max_transform_hierarchy_depth_intra = max_transform_hierarchy;
 
-	StdVideoH265ShortTermRefPicSet short_term_ref_pic_set = {};
 	StdVideoH265DecPicBufMgr dec_pic_buf_mgr = {};
 
-	short_term_ref_pic_set.num_negative_pics = 1;
-	short_term_ref_pic_set.use_delta_flag = 1;
-	short_term_ref_pic_set.used_by_curr_pic_s0_flag = 1;
-	short_term_ref_pic_set.used_by_curr_pic_flag = 1;
-	sps.pShortTermRefPicSet = &short_term_ref_pic_set;
+	// Should probably provide pShortTermRefPicSet here I think,
+	// but GPU hangs randomly on RADV when using that.
 	sps.pDecPicBufMgr = &dec_pic_buf_mgr;
 
 	vps.pProfileTierLevel = &level;
