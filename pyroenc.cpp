@@ -2255,17 +2255,11 @@ bool VideoSessionParameters::init_h265(Encoder::Impl &impl)
 	vps.pProfileTierLevel = &level;
 	vps.pDecPicBufMgr = &dec_pic_buf_mgr;
 
-	if (impl.vk12_props.driverID != VK_DRIVER_ID_MESA_RADV)
+	if ((syntax_flags & VK_VIDEO_ENCODE_H265_STD_TRANSFORM_SKIP_ENABLED_FLAG_SET_BIT_KHR) != 0 ||
+	    (syntax_flags & VK_VIDEO_ENCODE_H265_STD_TRANSFORM_SKIP_ENABLED_FLAG_UNSET_BIT_KHR) == 0)
 	{
-		// RADV randomly hangs GPU if this flag is set for whatever reason.
-		// However, it exposes SET_BIT, but not UNSET_BIT, so that's confusing ...
-
-		if ((syntax_flags & VK_VIDEO_ENCODE_H265_STD_TRANSFORM_SKIP_ENABLED_FLAG_SET_BIT_KHR) != 0 ||
-		    (syntax_flags & VK_VIDEO_ENCODE_H265_STD_TRANSFORM_SKIP_ENABLED_FLAG_UNSET_BIT_KHR) == 0)
-		{
-			pps.flags.transform_skip_enabled_flag = 1;
-			pps.log2_max_transform_skip_block_size_minus2 = find_msb(caps.transformBlockSizes);
-		}
+		pps.flags.transform_skip_enabled_flag = 1;
+		pps.log2_max_transform_skip_block_size_minus2 = find_msb(caps.transformBlockSizes);
 	}
 
 	if ((syntax_flags & VK_VIDEO_ENCODE_H265_STD_TRANSQUANT_BYPASS_ENABLED_FLAG_SET_BIT_KHR) != 0)
