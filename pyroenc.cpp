@@ -205,7 +205,7 @@ struct RateControl
 	bool init(Encoder::Impl &impl);
 
 	uint64_t frame_index = 0;
-	uint32_t gop_frame_index = 0;
+	uint64_t gop_frame_index = 0;
 	uint32_t idr_pic_id = 0;
 	bool needs_reset = true;
 
@@ -1161,13 +1161,16 @@ void H264EncodeInfo::setup(
 			h264_prev_ref.primary_pic_type = STD_VIDEO_H264_PICTURE_TYPE_P;
 	}
 
-	// This struct may be required by implementation. Providing it does not hurt.
-	gop_remaining.useGopRemainingFrames = VK_TRUE;
-	gop_remaining.gopRemainingB = 0; // TODO
-	gop_remaining.gopRemainingI = is_idr ? 1 : 0;
-	gop_remaining.gopRemainingP = rate.info.gop_frames - rate.gop_frame_index - gop_remaining.gopRemainingI;
-	gop_remaining.pNext = begin_info.pNext;
-	begin_info.pNext = &gop_remaining;
+	if (rate.info.gop_frames != UINT32_MAX)
+	{
+		// This struct may be required by implementation. Providing it does not hurt.
+		gop_remaining.useGopRemainingFrames = VK_TRUE;
+		gop_remaining.gopRemainingB = 0; // TODO
+		gop_remaining.gopRemainingI = is_idr ? 1 : 0;
+		gop_remaining.gopRemainingP = rate.info.gop_frames - rate.gop_frame_index - gop_remaining.gopRemainingI;
+		gop_remaining.pNext = begin_info.pNext;
+		begin_info.pNext = &gop_remaining;
+	}
 }
 
 void H265EncodeInfo::setup(
@@ -1253,13 +1256,16 @@ void H265EncodeInfo::setup(
 			h265_prev_ref.pic_type = STD_VIDEO_H265_PICTURE_TYPE_P;
 	}
 
-	// This struct may be required by implementation. Providing it does not hurt.
-	gop_remaining.useGopRemainingFrames = VK_TRUE;
-	gop_remaining.gopRemainingB = 0; // TODO
-	gop_remaining.gopRemainingI = is_idr ? 1 : 0;
-	gop_remaining.gopRemainingP = rate.info.gop_frames - rate.gop_frame_index - gop_remaining.gopRemainingI;
-	gop_remaining.pNext = begin_info.pNext;
-	begin_info.pNext = &gop_remaining;
+	if (rate.info.gop_frames != UINT32_MAX)
+	{
+		// This struct may be required by implementation. Providing it does not hurt.
+		gop_remaining.useGopRemainingFrames = VK_TRUE;
+		gop_remaining.gopRemainingB = 0; // TODO
+		gop_remaining.gopRemainingI = is_idr ? 1 : 0;
+		gop_remaining.gopRemainingP = rate.info.gop_frames - rate.gop_frame_index - gop_remaining.gopRemainingI;
+		gop_remaining.pNext = begin_info.pNext;
+		begin_info.pNext = &gop_remaining;
+	}
 }
 
 bool Encoder::Impl::record_and_submit_encode(VkCommandBuffer cmd, Frame &frame, bool &is_idr)
@@ -1270,9 +1276,7 @@ bool Encoder::Impl::record_and_submit_encode(VkCommandBuffer cmd, Frame &frame, 
 	video_coding_info.videoSessionParameters = session_params.params;
 	video_coding_info.pNext = &rate.rate_info;
 
-	//constexpr bool force_idr = true;
-
-	if (rate.gop_frame_index == rate.info.gop_frames || is_idr)
+	if ((rate.info.gop_frames != UINT32_MAX && rate.gop_frame_index == rate.info.gop_frames) || is_idr)
 		rate.gop_frame_index = 0;
 	is_idr = rate.gop_frame_index == 0;
 

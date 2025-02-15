@@ -67,6 +67,7 @@ struct RateControlInfo
 	uint32_t bitrate_kbits;
 	uint32_t max_bitrate_kbits;
 	int32_t constant_qp;
+	// If UINT32_MAX, open/infinite GOP is used. Need force_idr to force a new IDR frame.
 	uint32_t gop_frames;
 	RateControlMode mode;
 };
