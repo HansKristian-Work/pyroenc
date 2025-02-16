@@ -1,7 +1,7 @@
 ### Copyright (c) 2024 Arntzen Software AS
 ### SPDX-License-Identifier: MIT
 
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.10)
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_C_STANDARD 99)
 project(pyroenc LANGUAGES CXX C)
