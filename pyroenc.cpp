@@ -2228,9 +2228,11 @@ bool VideoSessionParameters::init_h265(Encoder::Impl &impl)
 	sps.flags.amp_enabled_flag = 1;
 	sps.flags.strong_intra_smoothing_enabled_flag = 1;
 
-	uint32_t ctb_min_size = 1u << (find_lsb(caps.ctbSizes) + 4);
-	uint32_t aligned_width = (impl.info.width + ctb_min_size - 1) & ~(ctb_min_size - 1);
-	uint32_t aligned_height = (impl.info.height + ctb_min_size - 1) & ~(ctb_min_size - 1);
+	constexpr uint32_t cb_min_size = 8;
+	const uint32_t alignment_width = std::max<uint32_t>(cb_min_size, impl.caps.video_caps.pictureAccessGranularity.width);
+	const uint32_t alignment_height = std::max<uint32_t>(cb_min_size, impl.caps.video_caps.pictureAccessGranularity.height);
+	uint32_t aligned_width = (impl.info.width + alignment_width - 1) & ~(alignment_width - 1);
+	uint32_t aligned_height = (impl.info.height + alignment_height - 1) & ~(alignment_height - 1);
 
 	if (aligned_width != impl.info.width || aligned_height != impl.info.height)
 	{
