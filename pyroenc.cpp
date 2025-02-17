@@ -1060,7 +1060,8 @@ struct H265EncodeInfo
 		{ VK_STRUCTURE_TYPE_VIDEO_ENCODE_H265_GOP_REMAINING_FRAME_INFO_KHR };
 
 	void setup(const VideoEncoderCaps &caps, const VideoSessionParameters &params, RateControl &rate,
-	           VkVideoBeginCodingInfoKHR &begin_info, VkVideoEncodeInfoKHR &info);
+	           VkVideoBeginCodingInfoKHR &begin_info, VkVideoEncodeInfoKHR &info,
+	           VkVideoEncodeTuningModeKHR tuning);
 };
 
 struct H264EncodeInfo
@@ -1177,7 +1178,8 @@ void H265EncodeInfo::setup(
 		const VideoEncoderCaps &caps,
 		const VideoSessionParameters &params, RateControl &rate,
 		VkVideoBeginCodingInfoKHR &begin_info,
-		VkVideoEncodeInfoKHR &info)
+		VkVideoEncodeInfoKHR &info,
+		VkVideoEncodeTuningModeKHR tuning)
 {
 	// Mostly based on nvpro sample.
 	// I don't really know what I'm doing here, but seems to work on NVIDIA at least.
@@ -1207,10 +1209,16 @@ void H265EncodeInfo::setup(
 	slice_header.slice_type = is_idr ? STD_VIDEO_H265_SLICE_TYPE_I : STD_VIDEO_H265_SLICE_TYPE_P;
 	slice_header.MaxNumMergeCand = 5;
 	slice_header.flags.first_slice_segment_in_pic_flag = 1;
-	if ((caps.h265.caps.stdSyntaxFlags & VK_VIDEO_ENCODE_H265_STD_SAMPLE_ADAPTIVE_OFFSET_ENABLED_FLAG_SET_BIT_KHR) != 0)
+
+	if (tuning != VK_VIDEO_ENCODE_TUNING_MODE_LOW_LATENCY_KHR &&
+	    tuning != VK_VIDEO_ENCODE_TUNING_MODE_ULTRA_LOW_LATENCY_KHR)
 	{
-		slice_header.flags.slice_sao_chroma_flag = 1;
-		slice_header.flags.slice_sao_luma_flag = 1;
+		if ((caps.h265.caps.stdSyntaxFlags &
+		     VK_VIDEO_ENCODE_H265_STD_SAMPLE_ADAPTIVE_OFFSET_ENABLED_FLAG_SET_BIT_KHR) != 0)
+		{
+			slice_header.flags.slice_sao_chroma_flag = 1;
+			slice_header.flags.slice_sao_luma_flag = 1;
+		}
 	}
 
 	if (rate.rate_info.rateControlMode == VK_VIDEO_ENCODE_RATE_CONTROL_MODE_DISABLED_BIT_KHR)
@@ -1354,7 +1362,7 @@ bool Encoder::Impl::record_and_submit_encode(VkCommandBuffer cmd, Frame &frame, 
 
 	case Profile::H265_Main:
 	case Profile::H265_Main10:
-		h265.setup(caps, session_params, rate, video_coding_info, encode_info);
+		h265.setup(caps, session_params, rate, video_coding_info, encode_info, info.hints.tuning);
 		break;
 
 	default:
@@ -2210,8 +2218,12 @@ bool VideoSessionParameters::init_h265(Encoder::Impl &impl)
 
 	auto syntax_flags = caps.stdSyntaxFlags;
 
-	if ((syntax_flags & VK_VIDEO_ENCODE_H265_STD_SAMPLE_ADAPTIVE_OFFSET_ENABLED_FLAG_SET_BIT_KHR) != 0)
-		sps.flags.sample_adaptive_offset_enabled_flag = 1;
+	if (impl.info.hints.tuning != VK_VIDEO_ENCODE_TUNING_MODE_LOW_LATENCY_KHR &&
+	    impl.info.hints.tuning != VK_VIDEO_ENCODE_TUNING_MODE_ULTRA_LOW_LATENCY_KHR)
+	{
+		if ((syntax_flags & VK_VIDEO_ENCODE_H265_STD_SAMPLE_ADAPTIVE_OFFSET_ENABLED_FLAG_SET_BIT_KHR) != 0)
+			sps.flags.sample_adaptive_offset_enabled_flag = 1;
+	}
 
 	sps.flags.amp_enabled_flag = 1;
 	sps.flags.strong_intra_smoothing_enabled_flag = 1;
