@@ -1978,23 +1978,18 @@ bool VideoEncoderCaps::setup(Encoder::Impl &impl)
 {
 	auto &table = impl.table;
 	video_caps.pNext = &encode_caps;
-	uint32_t block_alignment = 0;
 
 	switch (impl.info.profile)
 	{
 	case Profile::H264_High:
 		h264.caps = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_CAPABILITIES_KHR };
 		encode_caps.pNext = &h264.caps;
-		// 16x16 macroblocks.
-		block_alignment = 16;
 		break;
 
 	case Profile::H265_Main:
 	case Profile::H265_Main10:
 		h265.caps = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_H265_CAPABILITIES_KHR };
 		encode_caps.pNext = &h265.caps;
-		// Force alignment to the largest possible CTB.
-		block_alignment = 64;
 		break;
 
 	default:
@@ -2011,9 +2006,6 @@ bool VideoEncoderCaps::setup(Encoder::Impl &impl)
 	{
 		return false;
 	}
-
-	video_caps.pictureAccessGranularity.width = std::max<uint32_t>(video_caps.pictureAccessGranularity.width, block_alignment);
-	video_caps.pictureAccessGranularity.height = std::max<uint32_t>(video_caps.pictureAccessGranularity.height, block_alignment);
 
 	return true;
 }
@@ -2229,6 +2221,8 @@ bool VideoSessionParameters::init_h265(Encoder::Impl &impl)
 	sps.flags.strong_intra_smoothing_enabled_flag = 1;
 
 	constexpr uint32_t cb_min_size = 8;
+
+	// Align this to PAG, or RADV breaks at least.
 	const uint32_t alignment_width = std::max<uint32_t>(cb_min_size, impl.caps.video_caps.pictureAccessGranularity.width);
 	const uint32_t alignment_height = std::max<uint32_t>(cb_min_size, impl.caps.video_caps.pictureAccessGranularity.height);
 	uint32_t aligned_width = (impl.info.width + alignment_width - 1) & ~(alignment_width - 1);
