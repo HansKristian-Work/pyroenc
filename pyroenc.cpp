@@ -2289,6 +2289,10 @@ bool VideoSessionParameters::init_h265(Encoder::Impl &impl)
 	// This is required or NV output gets really broken.
 	pps.flags.cu_qp_delta_enabled_flag = 1;
 
+	// These seems to be required for some reason.
+	vps.flags.vps_temporal_id_nesting_flag = 1;
+	sps.flags.sps_temporal_id_nesting_flag = 1;
+
 	add_info.pStdPPSs = &pps;
 	add_info.pStdSPSs = &sps;
 	add_info.pStdVPSs = &vps;
