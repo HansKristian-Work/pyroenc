@@ -255,6 +255,8 @@ struct Encoder::Impl
 	VkCommandPool convert_cmd_pool = VK_NULL_HANDLE;
 	VkCommandPool encode_cmd_pool = VK_NULL_HANDLE;
 	VkQueryPool query_pool = VK_NULL_HANDLE;
+	VkQueryPool query_pool_timestamp = VK_NULL_HANDLE;
+	uint32_t encode_timestamp_bits = 0;
 
 	VkTable table = {};
 	bool func_table_is_valid = false;
@@ -272,6 +274,7 @@ struct Encoder::Impl
 
 	EncoderCreateInfo info = {};
 	VkPhysicalDeviceMemoryProperties mem_props = {};
+	VkPhysicalDeviceProperties vk_props = {};
 	VkPhysicalDeviceVulkan12Properties vk12_props = {};
 
 	LogCallback *cb = nullptr;
@@ -549,6 +552,7 @@ struct EncodedFrame::Impl
 		VkQueryResultStatusKHR status;
 	};
 	bool get_query(Query &query_data) const;
+	double get_encoding_overhead() const;
 };
 
 EncodedFrame::EncodedFrame()
@@ -606,6 +610,24 @@ bool EncodedFrame::Impl::get_query(Query &query_data) const
 	return query_data.status == VK_QUERY_RESULT_STATUS_COMPLETE_KHR;
 }
 
+double EncodedFrame::Impl::get_encoding_overhead() const
+{
+	auto &enc = *encoder;
+	auto &table = enc.table;
+
+	if (!enc.query_pool_timestamp)
+		return -1.0;
+
+	uint64_t ts[2];
+
+	if (VK_CALL(vkGetQueryPoolResults(enc.info.device, enc.query_pool_timestamp, 2 * frame_pool_index, 2, sizeof(ts),
+	                                  ts, sizeof(ts[0]), VK_QUERY_RESULT_64_BIT)) != VK_SUCCESS)
+		return -1.0;
+
+	uint64_t tick_offset = (ts[1] - ts[0]) & (((1ull << enc.encode_timestamp_bits) - 1) >> 1);
+	return double(tick_offset) * enc.vk_props.limits.timestampPeriod * 1e-9;
+}
+
 size_t EncodedFrame::get_size() const
 {
 	Impl::Query query = {};
@@ -613,6 +635,11 @@ size_t EncodedFrame::get_size() const
 		return 0;
 	else
 		return query.size;
+}
+
+double EncodedFrame::get_encoding_overhead() const
+{
+	return impl->get_encoding_overhead();
 }
 
 VkQueryResultStatusKHR EncodedFrame::get_status() const
@@ -722,6 +749,7 @@ Encoder::Impl::~Impl()
 	VK_CALL(vkDestroyCommandPool(info.device, convert_cmd_pool, nullptr));
 	VK_CALL(vkDestroyCommandPool(info.device, encode_cmd_pool, nullptr));
 	VK_CALL(vkDestroyQueryPool(info.device, query_pool, nullptr));
+	VK_CALL(vkDestroyQueryPool(info.device, query_pool_timestamp, nullptr));
 
 	session_params.destroy(*this);
 	session.destroy(*this);
@@ -1371,11 +1399,25 @@ bool Encoder::Impl::record_and_submit_encode(VkCommandBuffer cmd, Frame &frame, 
 
 	auto query_index = uint32_t(&frame - frame_pool);
 	VK_CALL(vkCmdResetQueryPool(cmd, query_pool, query_index, 1));
+
+	if (query_pool_timestamp)
+	{
+		VK_CALL(vkCmdResetQueryPool(cmd, query_pool_timestamp, query_index * 2 + 0, 2));
+		VK_CALL(vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_VIDEO_ENCODE_BIT_KHR,
+		                             query_pool_timestamp, query_index * 2 + 0));
+	}
+
 	VK_CALL(vkCmdBeginVideoCodingKHR(cmd, &video_coding_info));
 	VK_CALL(vkCmdBeginQuery(cmd, query_pool, query_index, 0));
 	VK_CALL(vkCmdEncodeVideoKHR(cmd, &encode_info));
 	VK_CALL(vkCmdEndQuery(cmd, query_pool, query_index));
 	VK_CALL(vkCmdEndVideoCodingKHR(cmd, &end_coding_info));
+
+	if (query_pool_timestamp)
+	{
+		VK_CALL(vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_VIDEO_ENCODE_BIT_KHR,
+		                             query_pool_timestamp, query_index * 2 + 1));
+	}
 
 	rate.gop_frame_index++;
 	rate.frame_index++;
@@ -1658,7 +1700,28 @@ bool Encoder::Impl::init_query_pool()
 	pool_info.queryType = VK_QUERY_TYPE_VIDEO_ENCODE_FEEDBACK_KHR;
 	pool_info.queryCount = FramePoolSize;
 	pool_info.pNext = &feedback_pool_info;
-	return VK_CALL(vkCreateQueryPool(info.device, &pool_info, nullptr, &query_pool)) == VK_SUCCESS;
+	if (VK_CALL(vkCreateQueryPool(info.device, &pool_info, nullptr, &query_pool)) != VK_SUCCESS)
+		return false;
+
+
+	uint32_t queue_count;
+	VK_CALL(vkGetPhysicalDeviceQueueFamilyProperties(info.gpu, &queue_count, nullptr));
+	std::vector<VkQueueFamilyProperties> props(queue_count);
+	VK_CALL(vkGetPhysicalDeviceQueueFamilyProperties(info.gpu, &queue_count, props.data()));
+
+	if (info.encode_queue.family_index < props.size())
+		encode_timestamp_bits = props[info.encode_queue.family_index].timestampValidBits;
+
+	if (encode_timestamp_bits)
+	{
+		pool_info.queryCount = FramePoolSize * 2;
+		pool_info.pNext = nullptr;
+		pool_info.queryType = VK_QUERY_TYPE_TIMESTAMP;
+		if (VK_CALL(vkCreateQueryPool(info.device, &pool_info, nullptr, &query_pool_timestamp)) != VK_SUCCESS)
+			return false;
+	}
+
+	return true;
 }
 
 bool Encoder::Impl::init_encoder(const EncoderCreateInfo &info_)
@@ -1671,6 +1734,7 @@ bool Encoder::Impl::init_encoder(const EncoderCreateInfo &info_)
 	vk12_props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES;
 	VkPhysicalDeviceProperties2 props2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &vk12_props };
 	VK_CALL(vkGetPhysicalDeviceProperties2(info.gpu, &props2));
+	vk_props = props2.properties;
 
 	if (!create_timeline_semaphore(compute_timeline))
 		return false;

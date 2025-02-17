@@ -170,7 +170,9 @@ int main(int argc, char *argv[])
 
 		if (status == VK_QUERY_RESULT_STATUS_COMPLETE_KHR)
 		{
-			LOGI("PTS = %u, IDR: %s, got frame size: %zu\n", unsigned(encoded_frame.get_pts()), encoded_frame.is_idr() ? "yes" : "no", size);
+			double overhead = encoded_frame.get_encoding_overhead();
+			LOGI("PTS = %u, IDR: %s, got frame size: %zu, overhead %.3f ms\n", unsigned(encoded_frame.get_pts()), encoded_frame.is_idr() ? "yes" : "no", size,
+			     overhead * 1e3);
 			if (encoded_frame.is_idr())
 				fwrite(encoder.get_encoded_parameters(), 1, encoder.get_encoded_parameters_size(), file);
 			fwrite(payload, 1, size, file);

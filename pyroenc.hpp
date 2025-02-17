@@ -87,6 +87,10 @@ struct EncodedFrame
 	VkQueryResultStatusKHR get_status() const;
 	bool is_idr() const;
 
+	// In seconds. How long time the encoding operation took.
+	// If negative, the implementation does not support timestamps in video encode queue.
+	double get_encoding_overhead() const;
+
 	EncodedFrame(EncodedFrame &&other) noexcept;
 	EncodedFrame &operator=(EncodedFrame &&other) noexcept;
 
