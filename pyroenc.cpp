@@ -1209,9 +1209,6 @@ void H265EncodeInfo::setup(
 		VkVideoEncodeInfoKHR &info,
 		VkVideoEncodeTuningModeKHR tuning)
 {
-	// Mostly based on nvpro sample.
-	// I don't really know what I'm doing here, but seems to work on NVIDIA at least.
-
 	bool is_idr = rate.gop_frame_index == 0;
 
 	for (uint32_t i = 0; i < STD_VIDEO_H265_MAX_NUM_LIST_REF; i++)
@@ -2199,9 +2196,6 @@ static uint32_t find_msb(uint32_t v)
 
 bool VideoSessionParameters::init_h265(Encoder::Impl &impl)
 {
-	// Mostly adapted from nvpro-samples VkEncoderConfigH265.cpp.
-	// Most of this is HEVC gibberish. I don't really know what I'm doing here :)
-
 	VkVideoSessionParametersCreateInfoKHR session_param_info =
 		{ VK_STRUCTURE_TYPE_VIDEO_SESSION_PARAMETERS_CREATE_INFO_KHR };
 	VkVideoEncodeH265SessionParametersCreateInfoKHR h265_session_param_info =

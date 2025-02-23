@@ -11,21 +11,22 @@ Development of this Vulkan video encoding library has been made in partnership w
 
 ## Device support
 
-As of May 2024, it only works on NVIDIA. The goal is to support every correct Vulkan video
-implementation, but RADV and AMD Windows drivers are known to crash.
-PyroEnc is actively tested against Vulkan validation layers.
+As of February 2025, pyroenc has been tested to work on NVIDIA and RADV.
+RADV requires mesa-git as some important driver bugs have been fixed that affects pyroenc.
+Eventually, these fixes should end up in a stable release.
 
-TODO: Current status of non-NVIDIA drivers is unknown.
+The goal is to support every correct Vulkan video implementation.
+PyroEnc is actively tested against Vulkan validation layers.
 
 ## Features
 
 Currently, H.264 encode with a simple I and P GOP structure is supported.
-H.265 is also supported, but it is highly experimental.
+H.265 is also supported for 8 and 10-bit (non-HDR) encode.
 The end goal is to support:
 
 - H.264
 - H.265 (8-bit / 10-bit / HDR)
-- AV1 (if/when that happens)
+- AV1
 
 The focus of this library is real-time, low-latency streaming, suitable for game streaming.
 This focus may extend to high-quality, high-latency encoding as well should
