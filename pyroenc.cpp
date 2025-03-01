@@ -102,6 +102,11 @@ struct VideoProfile
 		{
 			VkVideoEncodeH265ProfileInfoKHR profile;
 		} h265;
+
+		struct
+		{
+			VkVideoEncodeAV1ProfileInfoKHR profile;
+		} av1;
 	};
 
 	bool setup(Encoder::Impl &impl, Profile profile);
@@ -124,6 +129,11 @@ struct VideoEncoderCaps
 		{
 			VkVideoEncodeH265CapabilitiesKHR caps;
 		} h265;
+
+		struct
+		{
+			VkVideoEncodeAV1CapabilitiesKHR caps;
+		} av1;
 	};
 
 	bool setup(Encoder::Impl &impl);
@@ -167,6 +177,14 @@ struct VideoSessionParameters
 			StdVideoH265SequenceParameterSetVui vui;
 			VkVideoEncodeH265QualityLevelPropertiesKHR quality_level_props;
 		} h265;
+
+		struct
+		{
+			VkVideoEncodeAV1QualityLevelPropertiesKHR quality_level_props;
+			StdVideoAV1SequenceHeader sequence_header;
+			StdVideoAV1ColorConfig color_config;
+			StdVideoAV1TimingInfo timing_info;
+		} av1;
 	};
 
 	bool init(Encoder::Impl &impl);
@@ -175,6 +193,7 @@ struct VideoSessionParameters
 
 	bool init_h264(Encoder::Impl &impl);
 	bool init_h265(Encoder::Impl &impl);
+	bool init_av1(Encoder::Impl &impl);
 };
 
 struct RateControl
@@ -200,6 +219,12 @@ struct RateControl
 			VkVideoEncodeH265RateControlInfoKHR rate_control;
 			VkVideoEncodeH265RateControlLayerInfoKHR layer;
 		} h265;
+
+		struct
+		{
+			VkVideoEncodeAV1RateControlInfoKHR rate_control;
+			VkVideoEncodeAV1RateControlLayerInfoKHR layer;
+		} av1;
 	};
 
 	bool init(Encoder::Impl &impl);
@@ -1113,6 +1138,100 @@ struct H264EncodeInfo
 	           VkVideoBeginCodingInfoKHR &begin_info, VkVideoEncodeInfoKHR &info);
 };
 
+struct AV1EncodeInfo
+{
+	VkVideoEncodeAV1PictureInfoKHR av1_src_info = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_AV1_PICTURE_INFO_KHR };
+	StdVideoEncodeAV1PictureInfo pic = {};
+	VkVideoEncodeAV1GopRemainingFrameInfoKHR gop_remaining =
+		{ VK_STRUCTURE_TYPE_VIDEO_ENCODE_AV1_GOP_REMAINING_FRAME_INFO_KHR };
+
+	VkVideoEncodeAV1DpbSlotInfoKHR av1_reconstructed_dpb_slot = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_AV1_DPB_SLOT_INFO_KHR };
+	StdVideoEncodeAV1ReferenceInfo av1_reconstructed_ref = {};
+
+	VkVideoEncodeAV1DpbSlotInfoKHR av1_prev_ref_slot = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_AV1_DPB_SLOT_INFO_KHR };
+	StdVideoEncodeAV1ReferenceInfo av1_prev_ref = {};
+
+	void setup(uint32_t width, uint32_t height,
+	           const VideoEncoderCaps &caps, const VideoSessionParameters &params, RateControl &rate,
+	           VkVideoBeginCodingInfoKHR &begin_info, VkVideoEncodeInfoKHR &info);
+};
+
+void AV1EncodeInfo::setup(
+		uint32_t width, uint32_t height,
+		const VideoEncoderCaps &caps,
+		const VideoSessionParameters &params, RateControl &rate,
+		VkVideoBeginCodingInfoKHR &begin_info,
+		VkVideoEncodeInfoKHR &info)
+{
+	bool is_idr = rate.gop_frame_index == 0;
+
+	av1_src_info.rateControlGroup = is_idr ? VK_VIDEO_ENCODE_AV1_RATE_CONTROL_GROUP_INTRA_KHR :
+	                                VK_VIDEO_ENCODE_AV1_RATE_CONTROL_GROUP_PREDICTIVE_KHR;
+	av1_src_info.predictionMode = is_idr ? VK_VIDEO_ENCODE_AV1_PREDICTION_MODE_INTRA_ONLY_KHR :
+	                              VK_VIDEO_ENCODE_AV1_PREDICTION_MODE_SINGLE_REFERENCE_KHR;
+
+	if (rate.rate_info.rateControlMode == VK_VIDEO_ENCODE_RATE_CONTROL_MODE_DISABLED_BIT_KHR)
+	{
+		av1_src_info.constantQIndex = rate.info.constant_qp;
+		if (av1_src_info.constantQIndex < caps.av1.caps.minQIndex)
+			av1_src_info.constantQIndex = caps.av1.caps.minQIndex;
+		else if (av1_src_info.constantQIndex > caps.av1.caps.maxQIndex)
+			av1_src_info.constantQIndex = caps.av1.caps.maxQIndex;
+	}
+
+	av1_src_info.pStdPictureInfo = &pic;
+
+	pic.render_width_minus_1 = width - 1;
+	pic.render_height_minus_1 = height - 1;
+	pic.current_frame_id = rate.gop_frame_index;
+	pic.frame_type = is_idr ? STD_VIDEO_AV1_FRAME_TYPE_KEY : STD_VIDEO_AV1_FRAME_TYPE_INTER;
+	pic.flags.show_frame = 1;
+	pic.refresh_frame_flags = is_idr ? 0xff : (1 << (rate.gop_frame_index & 1));
+
+	pic.primary_ref_frame = STD_VIDEO_AV1_PRIMARY_REF_NONE;
+	for (auto &idx : av1_src_info.referenceNameSlotIndices)
+		idx = -1;
+
+	if (!is_idr)
+	{
+		av1_src_info.referenceNameSlotIndices[0] = int(rate.gop_frame_index - 1) & 1;
+		pic.primary_ref_frame = 0;
+	}
+
+	info.pNext = &av1_src_info;
+
+	av1_reconstructed_dpb_slot.pStdReferenceInfo = &av1_reconstructed_ref;
+	av1_reconstructed_ref.frame_type = pic.frame_type;
+	av1_reconstructed_ref.RefFrameId = pic.current_frame_id;
+	const_cast<VkVideoReferenceSlotInfoKHR *>(info.pSetupReferenceSlot)->pNext = &av1_reconstructed_dpb_slot;
+
+	if (!is_idr)
+	{
+		assert(info.referenceSlotCount == 1);
+		const_cast<VkVideoReferenceSlotInfoKHR &>(info.pReferenceSlots[0]).pNext = &av1_prev_ref_slot;
+		av1_prev_ref_slot.pStdReferenceInfo = &av1_prev_ref;
+
+		av1_prev_ref.RefFrameId = rate.gop_frame_index - 1;
+
+		// Does this matter?
+		if (rate.gop_frame_index == 1)
+			av1_prev_ref.frame_type = STD_VIDEO_AV1_FRAME_TYPE_KEY;
+		else
+			av1_prev_ref.frame_type = STD_VIDEO_AV1_FRAME_TYPE_INTER;
+	}
+
+	if (rate.info.gop_frames != UINT32_MAX)
+	{
+		// This struct may be required by implementation. Providing it does not hurt.
+		gop_remaining.useGopRemainingFrames = VK_TRUE;
+		gop_remaining.gopRemainingBipredictive = 0; // TODO
+		gop_remaining.gopRemainingIntra = is_idr ? 1 : 0;
+		gop_remaining.gopRemainingPredictive = rate.info.gop_frames - rate.gop_frame_index - gop_remaining.gopRemainingIntra;
+		gop_remaining.pNext = begin_info.pNext;
+		begin_info.pNext = &gop_remaining;
+	}
+}
+
 void H264EncodeInfo::setup(
 		const VideoEncoderCaps &caps,
 		const VideoSessionParameters &params, RateControl &rate,
@@ -1326,6 +1445,7 @@ bool Encoder::Impl::record_and_submit_encode(VkCommandBuffer cmd, Frame &frame, 
 
 	H264EncodeInfo h264;
 	H265EncodeInfo h265;
+	AV1EncodeInfo av1;
 
 	if (dpb.array_dpb.image)
 	{
@@ -1388,6 +1508,10 @@ bool Encoder::Impl::record_and_submit_encode(VkCommandBuffer cmd, Frame &frame, 
 	case Profile::H265_Main:
 	case Profile::H265_Main10:
 		h265.setup(caps, session_params, rate, video_coding_info, encode_info, info.hints.tuning);
+		break;
+
+	case Profile::AV1_Main:
+		av1.setup(info.width, info.height, caps, session_params, rate, video_coding_info, encode_info);
 		break;
 
 	default:
@@ -2017,6 +2141,16 @@ bool VideoProfile::setup(Encoder::Impl &impl, Profile profile)
 		profile_info.pNext = &h265.profile;
 		break;
 
+	case Profile::AV1_Main:
+		av1.profile = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_AV1_PROFILE_INFO_KHR };
+		profile_info.chromaSubsampling = VK_VIDEO_CHROMA_SUBSAMPLING_420_BIT_KHR;
+		profile_info.chromaBitDepth = VK_VIDEO_COMPONENT_BIT_DEPTH_10_BIT_KHR;
+		profile_info.lumaBitDepth = VK_VIDEO_COMPONENT_BIT_DEPTH_10_BIT_KHR;
+		profile_info.videoCodecOperation = VK_VIDEO_CODEC_OPERATION_ENCODE_AV1_BIT_KHR;
+		av1.profile.stdProfile = STD_VIDEO_AV1_PROFILE_MAIN;
+		profile_info.pNext = &av1.profile;
+		break;
+
 	default:
 		return false;
 	}
@@ -2051,6 +2185,11 @@ bool VideoEncoderCaps::setup(Encoder::Impl &impl)
 	case Profile::H265_Main10:
 		h265.caps = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_H265_CAPABILITIES_KHR };
 		encode_caps.pNext = &h265.caps;
+		break;
+
+	case Profile::AV1_Main:
+		av1.caps = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_AV1_CAPABILITIES_KHR };
+		encode_caps.pNext = &av1.caps;
 		break;
 
 	default:
@@ -2159,6 +2298,9 @@ bool VideoSessionParameters::init(Encoder::Impl &impl)
 	case Profile::H265_Main:
 	case Profile::H265_Main10:
 		return init_h265(impl);
+
+	case Profile::AV1_Main:
+		return init_av1(impl);
 
 	default:
 		return false;
@@ -2584,6 +2726,96 @@ bool VideoSessionParameters::init_h264(Encoder::Impl &impl)
 	return true;
 }
 
+bool VideoSessionParameters::init_av1(Encoder::Impl &impl)
+{
+	VkVideoSessionParametersCreateInfoKHR session_param_info =
+			{ VK_STRUCTURE_TYPE_VIDEO_SESSION_PARAMETERS_CREATE_INFO_KHR };
+	VkVideoEncodeAV1SessionParametersCreateInfoKHR av1_session_param_info =
+			{ VK_STRUCTURE_TYPE_VIDEO_ENCODE_AV1_SESSION_PARAMETERS_CREATE_INFO_KHR };
+
+	av1 = {};
+	av1_session_param_info.pStdSequenceHeader = &av1.sequence_header;
+
+	auto &seq = av1.sequence_header;
+	seq.max_frame_width_minus_1 = impl.info.width - 1;
+	seq.max_frame_height_minus_1 = impl.info.height - 1;
+	seq.frame_width_bits_minus_1 = std::max<uint32_t>(find_msb(seq.max_frame_width_minus_1), 1) - 1;
+	seq.frame_height_bits_minus_1 = std::max<uint32_t>(find_msb(seq.max_frame_height_minus_1), 1) - 1;
+	seq.flags.frame_id_numbers_present_flag = 1;
+	seq.pColorConfig = &av1.color_config;
+	seq.pTimingInfo = &av1.timing_info;
+
+	av1.color_config.flags.color_description_present_flag = 1;
+	av1.color_config.flags.color_range = 0;
+	av1.color_config.chroma_sample_position = STD_VIDEO_AV1_CHROMA_SAMPLE_POSITION_VERTICAL;
+	av1.color_config.color_primaries = STD_VIDEO_AV1_COLOR_PRIMARIES_BT_709;
+	av1.color_config.BitDepth = 10;
+	av1.color_config.subsampling_x = 1;
+	av1.color_config.subsampling_y = 1;
+	av1.color_config.transfer_characteristics = STD_VIDEO_AV1_TRANSFER_CHARACTERISTICS_BT_709;
+	av1.color_config.matrix_coefficients = STD_VIDEO_AV1_MATRIX_COEFFICIENTS_BT_709;
+
+	// For real-time streaming, PTS should be defined in other ways perhaps.
+	av1.timing_info.flags.equal_picture_interval = 0;
+	av1.timing_info.time_scale = impl.info.frame_rate_num;
+	av1.timing_info.num_units_in_display_tick = impl.info.frame_rate_den;
+
+	// Is there any reason to *not* use these?
+	seq.flags.enable_cdef = 1;
+	seq.flags.enable_restoration = 1;
+	seq.flags.enable_dual_filter = 1;
+	seq.flags.enable_filter_intra = 1;
+
+	auto &table = impl.table;
+
+	// Simple rounding to nearest quality level.
+	quality_level.qualityLevel = uint32_t(saturate(impl.info.quality_level) *
+	                                      float(impl.caps.encode_caps.maxQualityLevels - 1) + 0.5f);
+	av1_session_param_info.pNext = &quality_level;
+
+	// Query some properties for the quality level we chose.
+	VkPhysicalDeviceVideoEncodeQualityLevelInfoKHR quality_level_info =
+			{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VIDEO_ENCODE_QUALITY_LEVEL_INFO_KHR };
+	quality_level_info.pVideoProfile = &impl.profile.profile_info;
+	quality_level_info.qualityLevel = quality_level.qualityLevel;
+	av1.quality_level_props = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_AV1_QUALITY_LEVEL_PROPERTIES_KHR };
+	quality_level_props.pNext = &av1.quality_level_props;
+	VK_CALL(vkGetPhysicalDeviceVideoEncodeQualityLevelPropertiesKHR(impl.info.gpu, &quality_level_info,
+	                                                                &quality_level_props));
+
+	session_param_info.pNext = &av1_session_param_info;
+	session_param_info.videoSession = impl.session.session;
+
+	if (VK_CALL(vkCreateVideoSessionParametersKHR(impl.info.device, &session_param_info,
+	                                              nullptr, &params)) != VK_SUCCESS)
+	{
+		params = VK_NULL_HANDLE;
+		return false;
+	}
+
+	VkVideoEncodeSessionParametersGetInfoKHR params_get_info =
+			{ VK_STRUCTURE_TYPE_VIDEO_ENCODE_SESSION_PARAMETERS_GET_INFO_KHR };
+	VkVideoEncodeSessionParametersFeedbackInfoKHR feedback_info =
+			{ VK_STRUCTURE_TYPE_VIDEO_ENCODE_SESSION_PARAMETERS_FEEDBACK_INFO_KHR };
+
+	params_get_info.videoSessionParameters = params;
+
+	encoded_parameters.resize(256);
+	size_t params_size = encoded_parameters.size();
+	auto res = VK_CALL(vkGetEncodedVideoSessionParametersKHR(
+			impl.info.device, &params_get_info,
+			&feedback_info, &params_size, encoded_parameters.data()));
+
+	if (res != VK_SUCCESS)
+	{
+		VK_CALL(vkDestroyVideoSessionParametersKHR(impl.info.device, params, nullptr));
+		params = VK_NULL_HANDLE;
+	}
+
+	encoded_parameters.resize(params_size);
+	return true;
+}
+
 void VideoSessionParameters::destroy(Encoder::Impl &impl)
 {
 	auto &table = impl.table;
@@ -2737,6 +2969,42 @@ bool RateControl::init(Encoder::Impl &impl)
 			h265.layer.maxFrameSize.frameISize = MaxPayloadSize;
 			h265.layer.maxFrameSize.framePSize = MaxPayloadSize;
 			h265.layer.maxFrameSize.frameBSize = MaxPayloadSize;
+		}
+		else if (impl.info.profile == Profile::AV1_Main)
+		{
+			rate_info.pNext = &av1.rate_control;
+			layer.pNext = &av1.layer;
+
+			av1.rate_control = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_AV1_RATE_CONTROL_INFO_KHR };
+			av1.layer = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_AV1_RATE_CONTROL_LAYER_INFO_KHR };
+
+			// If GOP is invalid, override it with some sensible defaults.
+			if (info.gop_frames == 0)
+				info.gop_frames = impl.session_params.av1.quality_level_props.preferredGopFrameCount;
+			if (info.gop_frames == 0)
+				info.gop_frames = 1;
+
+			av1.rate_control.consecutiveBipredictiveFrameCount = 0;
+			av1.rate_control.keyFramePeriod = info.gop_frames;
+			av1.rate_control.gopFrameCount = info.gop_frames;
+
+			// When we start using intra-refresh, we cannot use these.
+			if ((impl.session_params.av1.quality_level_props.preferredRateControlFlags &
+			     VK_VIDEO_ENCODE_AV1_RATE_CONTROL_REFERENCE_PATTERN_FLAT_BIT_KHR) != 0)
+			{
+				av1.rate_control.flags |= VK_VIDEO_ENCODE_AV1_RATE_CONTROL_REGULAR_GOP_BIT_KHR |
+				                          VK_VIDEO_ENCODE_AV1_RATE_CONTROL_REFERENCE_PATTERN_FLAT_BIT_KHR;
+			}
+			else if ((impl.session_params.av1.quality_level_props.preferredRateControlFlags &
+			          VK_VIDEO_ENCODE_AV1_RATE_CONTROL_REGULAR_GOP_BIT_KHR) != 0)
+			{
+				av1.rate_control.flags |= VK_VIDEO_ENCODE_AV1_RATE_CONTROL_REGULAR_GOP_BIT_KHR;
+			}
+
+			av1.layer.useMaxFrameSize = VK_TRUE;
+			av1.layer.maxFrameSize.intraFrameSize = MaxPayloadSize;
+			av1.layer.maxFrameSize.predictiveFrameSize = MaxPayloadSize;
+			av1.layer.maxFrameSize.bipredictiveFrameSize = MaxPayloadSize;
 		}
 	}
 

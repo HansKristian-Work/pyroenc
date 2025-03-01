@@ -47,7 +47,8 @@ int main(int argc, char *argv[])
 	if (!ctx.init_instance_and_device(nullptr, 0, &ext, 1,
 	                                  CONTEXT_CREATION_ENABLE_VIDEO_ENCODE_BIT |
 	                                  CONTEXT_CREATION_ENABLE_VIDEO_H264_BIT |
-	                                  CONTEXT_CREATION_ENABLE_VIDEO_H265_BIT))
+	                                  CONTEXT_CREATION_ENABLE_VIDEO_H265_BIT |
+	                                  CONTEXT_CREATION_ENABLE_VIDEO_AV1_BIT))
 	{
 		LOGE("Failed to create context.\n");
 		return EXIT_FAILURE;
@@ -69,7 +70,7 @@ int main(int argc, char *argv[])
 	info.get_instance_proc_addr = Context::get_instance_proc_addr();
 	info.width = width;
 	info.height = height;
-	info.profile = Profile::H265_Main10;
+	info.profile = Profile::AV1_Main;
 	info.quality_level = 1.0f;
 
 	info.encode_queue.queue =
