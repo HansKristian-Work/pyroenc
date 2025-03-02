@@ -1159,7 +1159,7 @@ struct AV1EncodeInfo
 void AV1EncodeInfo::setup(
 		uint32_t width, uint32_t height,
 		const VideoEncoderCaps &caps,
-		const VideoSessionParameters &params, RateControl &rate,
+		const VideoSessionParameters &, RateControl &rate,
 		VkVideoBeginCodingInfoKHR &begin_info,
 		VkVideoEncodeInfoKHR &info)
 {
@@ -2144,8 +2144,8 @@ bool VideoProfile::setup(Encoder::Impl &impl, Profile profile)
 	case Profile::AV1_Main:
 		av1.profile = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_AV1_PROFILE_INFO_KHR };
 		profile_info.chromaSubsampling = VK_VIDEO_CHROMA_SUBSAMPLING_420_BIT_KHR;
-		profile_info.chromaBitDepth = VK_VIDEO_COMPONENT_BIT_DEPTH_10_BIT_KHR;
-		profile_info.lumaBitDepth = VK_VIDEO_COMPONENT_BIT_DEPTH_10_BIT_KHR;
+		profile_info.chromaBitDepth = VK_VIDEO_COMPONENT_BIT_DEPTH_8_BIT_KHR;
+		profile_info.lumaBitDepth = VK_VIDEO_COMPONENT_BIT_DEPTH_8_BIT_KHR;
 		profile_info.videoCodecOperation = VK_VIDEO_CODEC_OPERATION_ENCODE_AV1_BIT_KHR;
 		av1.profile.stdProfile = STD_VIDEO_AV1_PROFILE_MAIN;
 		profile_info.pNext = &av1.profile;
@@ -2739,9 +2739,10 @@ bool VideoSessionParameters::init_av1(Encoder::Impl &impl)
 	auto &seq = av1.sequence_header;
 	seq.max_frame_width_minus_1 = impl.info.width - 1;
 	seq.max_frame_height_minus_1 = impl.info.height - 1;
-	seq.frame_width_bits_minus_1 = std::max<uint32_t>(find_msb(seq.max_frame_width_minus_1), 1) - 1;
-	seq.frame_height_bits_minus_1 = std::max<uint32_t>(find_msb(seq.max_frame_height_minus_1), 1) - 1;
-	seq.flags.frame_id_numbers_present_flag = 1;
+	seq.frame_width_bits_minus_1 = find_msb(seq.max_frame_width_minus_1);
+	seq.frame_height_bits_minus_1 = find_msb(seq.max_frame_height_minus_1);
+	//seq.flags.frame_id_numbers_present_flag = 1;
+	seq.flags.timing_info_present_flag = 1;
 	seq.pColorConfig = &av1.color_config;
 	seq.pTimingInfo = &av1.timing_info;
 
@@ -2749,14 +2750,14 @@ bool VideoSessionParameters::init_av1(Encoder::Impl &impl)
 	av1.color_config.flags.color_range = 0;
 	av1.color_config.chroma_sample_position = STD_VIDEO_AV1_CHROMA_SAMPLE_POSITION_VERTICAL;
 	av1.color_config.color_primaries = STD_VIDEO_AV1_COLOR_PRIMARIES_BT_709;
-	av1.color_config.BitDepth = 10;
+	av1.color_config.BitDepth = 8;
 	av1.color_config.subsampling_x = 1;
 	av1.color_config.subsampling_y = 1;
 	av1.color_config.transfer_characteristics = STD_VIDEO_AV1_TRANSFER_CHARACTERISTICS_BT_709;
 	av1.color_config.matrix_coefficients = STD_VIDEO_AV1_MATRIX_COEFFICIENTS_BT_709;
 
 	// For real-time streaming, PTS should be defined in other ways perhaps.
-	av1.timing_info.flags.equal_picture_interval = 0;
+	av1.timing_info.flags.equal_picture_interval = 1;
 	av1.timing_info.time_scale = impl.info.frame_rate_num;
 	av1.timing_info.num_units_in_display_tick = impl.info.frame_rate_den;
 
@@ -2765,6 +2766,9 @@ bool VideoSessionParameters::init_av1(Encoder::Impl &impl)
 	seq.flags.enable_restoration = 1;
 	seq.flags.enable_dual_filter = 1;
 	seq.flags.enable_filter_intra = 1;
+	seq.flags.enable_intra_edge_filter = 1;
+	// This causes NV driver to fail session for some reason.
+	//seq.flags.use_128x128_superblock = 1;
 
 	auto &table = impl.table;
 

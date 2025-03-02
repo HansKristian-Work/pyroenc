@@ -10,6 +10,136 @@
 using namespace PyroEnc;
 using namespace Vulkan;
 
+// AV1 Annex B helpers.
+enum OBUTypes : uint8_t
+{
+	OBU_SEQUENCE_HEADER = 1,
+	OBU_TEMPORAL_DELIMITER = 2,
+	OBU_FRAME_HEADER = 3,
+	OBU_TILE_GROUP = 4,
+	OBU_METADATA = 5,
+	OBU_FRAME = 6,
+	OBU_REDUNDANT_FRAME_HEADER = 7,
+	OBU_TILE_LIST = 8,
+	OBU_PADDING = 15
+};
+
+static size_t write_leb128(FILE *file, size_t size)
+{
+	size_t written_bytes = 0;
+	while (size)
+	{
+		uint8_t write_byte = size & 0x7f;
+		if (size >= 0x80)
+			write_byte |= 0x80;
+
+		if (file && fwrite(&write_byte, 1, 1, file) != 1)
+			return 0;
+		written_bytes++;
+		size >>= 7;
+	}
+
+	return written_bytes;
+}
+
+static bool write_av1_annex_b_frame(FILE *file, const void *payload_, size_t size,
+                                    const void *header_, size_t header_size)
+{
+	const auto *payload = static_cast<const uint8_t *>(payload_);
+	const auto *header = static_cast<const uint8_t *>(header_);
+
+	// The encoded payload seems to be a single OBU containing OBU_SEQUENCE_HEADER, with size field set.
+	// If this is not the case, report an error as a sanity check.
+	if (header_size >= 3)
+	{
+		// obu_header()
+		auto type = OBUTypes((header[0] >> 3) & 0xf);
+		if (type != OBU_SEQUENCE_HEADER)
+		{
+			fprintf(stderr, "Encoded parameters is not SEQUENCE_HEADER?\n");
+			return false;
+		}
+
+		bool has_extension_header = (header[0] & 0x4) != 0;
+		int size_offset = has_extension_header ? 2 : 1;
+
+		if (header[size_offset] != header_size - (size_offset + 1))
+		{
+			// Can this happen? We'll have to split them.
+			fprintf(stderr, "There are trailing OBUs in the encoded payload?\n");
+			return false;
+		}
+	}
+
+	// Encode everything as one temporal unit and one frame.
+
+	size_t frame_size = 0;
+
+	// FFmpeg complains about a missing TEMPORAL_DELIMITER OBU if it's not present, so add that for every frame.
+	frame_size += write_leb128(nullptr, 1);
+	frame_size += 1;
+
+	if (header_size)
+	{
+		frame_size += write_leb128(nullptr, header_size);
+		frame_size += header_size;
+	}
+
+	// In Vulkan spec, a single frame can be encoded either as a single OBU with OBU_FRAME, or multiple OBUs.
+	// Have to scan through the bitstream, and split them up so they can be packetized into an Annex B frame.
+	auto obu_type = OBUTypes((payload[0] >> 3) & 0xf);
+	if (obu_type == OBU_FRAME)
+	{
+		// Single OBU, simple case.
+		frame_size += write_leb128(nullptr, size);
+		frame_size += size;
+	}
+	else if (obu_type == OBU_FRAME_HEADER)
+	{
+		fprintf(stderr, "Got OBU_FRAME_HEADER. Currently unimplemented.\n");
+		return false;
+	}
+	else
+	{
+		fprintf(stderr, "Invalid OBU.\n");
+		return false;
+	}
+
+	size_t temporal_size = frame_size + write_leb128(nullptr, frame_size);
+
+	// Temporal unit
+	if (!write_leb128(file, temporal_size))
+		return false;
+
+	// Frame
+	if (!write_leb128(file, frame_size))
+		return false;
+
+	// TEMPORAL_DELIMITER OBU. The size field is not needed since it's implied.
+	const uint8_t delimiter = OBU_TEMPORAL_DELIMITER << 3;
+	if (!write_leb128(file, sizeof(delimiter)))
+		return false;
+	if (fwrite(&delimiter, 1, sizeof(delimiter), file) != sizeof(delimiter))
+		return false;
+
+	// SEQUENCE_HEADER OBU
+	if (header_size)
+	{
+		if (!write_leb128(file, header_size))
+			return false;
+		if (fwrite(header, 1, header_size, file) != header_size)
+			return false;
+	}
+
+	// FRAME OBU
+	if (!write_leb128(file, size))
+		return false;
+	if (fwrite(payload, 1, size, file) != size)
+		return false;
+
+	return true;
+}
+
 int main(int argc, char *argv[])
 {
 	if (argc != 7)
@@ -143,7 +273,6 @@ int main(int argc, char *argv[])
 			dev.next_frame_context();
 		}
 
-
 		frame.pts = pts++;
 		if (encoder.send_frame(frame) != Result::Success)
 		{
@@ -174,9 +303,21 @@ int main(int argc, char *argv[])
 			double overhead = encoded_frame.get_encoding_overhead();
 			LOGI("PTS = %u, IDR: %s, got frame size: %zu, overhead %.3f ms\n", unsigned(encoded_frame.get_pts()), encoded_frame.is_idr() ? "yes" : "no", size,
 			     overhead * 1e3);
-			if (encoded_frame.is_idr())
-				fwrite(encoder.get_encoded_parameters(), 1, encoder.get_encoded_parameters_size(), file);
-			fwrite(payload, 1, size, file);
+
+			if (info.profile == Profile::AV1_Main)
+			{
+				// For AV1 we need to write an Annex B stream to make FFmpeg understand it.
+				// H264/H265 can be parsed directly from raw NALU it seems.
+				write_av1_annex_b_frame(file, payload, size,
+				                        encoded_frame.is_idr() ? encoder.get_encoded_parameters() : nullptr,
+				                        encoded_frame.is_idr() ? encoder.get_encoded_parameters_size() : 0);
+			}
+			else
+			{
+				if (encoded_frame.is_idr())
+					fwrite(encoder.get_encoded_parameters(), 1, encoder.get_encoded_parameters_size(), file);
+				fwrite(payload, 1, size, file);
+			}
 		}
 		else
 		{
