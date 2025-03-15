@@ -1709,6 +1709,10 @@ bool Encoder::Impl::init_query_pool()
 	if (info.encode_queue.family_index < props.size())
 		encode_timestamp_bits = props[info.encode_queue.family_index].timestampValidBits;
 
+	// Driver lies, it actually doesn't work: see issue 12833.
+	if (vk12_props.driverID == VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA)
+		encode_timestamp_bits = 0;
+
 	if (encode_timestamp_bits)
 	{
 		pool_info.queryCount = FramePoolSize * 2;

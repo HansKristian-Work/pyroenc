@@ -69,7 +69,7 @@ int main(int argc, char *argv[])
 	info.get_instance_proc_addr = Context::get_instance_proc_addr();
 	info.width = width;
 	info.height = height;
-	info.profile = Profile::H265_Main10;
+	info.profile = Profile::H264_High;
 	info.quality_level = 1.0f;
 
 	info.encode_queue.queue =
