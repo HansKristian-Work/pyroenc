@@ -100,7 +100,7 @@ int main(int argc, char *argv[])
 	auto img = dev.create_image(image_info);
 
 	FrameInfo frame = {};
-	frame.view = img->get_view().get_view();
+	frame.view = img->get_view().get_view().view;
 	frame.width = img->get_width();
 	frame.height = img->get_height();
 
