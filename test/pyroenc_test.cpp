@@ -43,11 +43,12 @@ int main(int argc, char *argv[])
 	}
 
 	Context ctx;
-	const char *ext = VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME;
-	if (!ctx.init_instance_and_device(nullptr, 0, &ext, 1,
+
+	if (!ctx.init_instance_and_device(nullptr, 0, nullptr, 0,
 	                                  CONTEXT_CREATION_ENABLE_VIDEO_ENCODE_BIT |
 	                                  CONTEXT_CREATION_ENABLE_VIDEO_H264_BIT |
-	                                  CONTEXT_CREATION_ENABLE_VIDEO_H265_BIT))
+	                                  CONTEXT_CREATION_ENABLE_VIDEO_H265_BIT |
+	                                  CONTEXT_CREATION_ENABLE_PUSH_DESCRIPTOR_BIT))
 	{
 		LOGE("Failed to create context.\n");
 		return EXIT_FAILURE;
@@ -56,9 +57,9 @@ int main(int argc, char *argv[])
 	Device dev;
 	dev.set_context(ctx);
 
-	if (!dev.get_device_features().supports_video_encode_h265)
+	if (!dev.get_device_features().supports_video_encode_h264)
 	{
-		LOGE("Device does not support H.265 encode.\n");
+		LOGE("Device does not support H.264 encode.\n");
 		return EXIT_FAILURE;
 	}
 
