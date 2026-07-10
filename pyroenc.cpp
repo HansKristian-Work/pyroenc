@@ -2321,6 +2321,7 @@ bool VideoSessionParameters::init_h265(Encoder::Impl &impl)
 	sps.max_transform_hierarchy_depth_intra = max_transform_hierarchy;
 
 	StdVideoH265DecPicBufMgr dec_pic_buf_mgr = {};
+	dec_pic_buf_mgr.max_dec_pic_buffering_minus1[0] = MaxActiveReferencePictures;
 
 	// Should probably provide pShortTermRefPicSet here I think,
 	// but GPU hangs randomly on RADV when using that.
