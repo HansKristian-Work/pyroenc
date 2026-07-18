@@ -37,10 +37,7 @@ the need arise.
 - Take RGB as input (YCbCr conversion happens on GPU)
 - Adjust rate control dynamically
 - Insert IDR frames on-demand
-
-### Future features when drivers mature
-
-- Intra-refresh
+- Intra-refresh (not well-tested yet)
 
 ## API
 
