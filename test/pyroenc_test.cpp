@@ -88,12 +88,20 @@ int main(int argc, char *argv[])
 	info.hints.content = VK_VIDEO_ENCODE_CONTENT_RENDERED_BIT_KHR;
 	info.hints.usage = VK_VIDEO_ENCODE_USAGE_STREAMING_BIT_KHR;
 
+	if (dev.get_device_features().intra_refresh_features.videoEncodeIntraRefresh)
+		info.intra_refresh_period = 16;
+
 	Encoder encoder;
 	if (encoder.init_encoder(info) != Result::Success)
 	{
 		LOGE("Failed to init encoder.\n");
 		return EXIT_FAILURE;
 	}
+
+	if (encoder.intra_refresh_enabled())
+		LOGI("Using intra refresh.\n");
+	else
+		LOGI("Not using intra refresh.\n");
 
 	auto image_info = Vulkan::ImageCreateInfo::render_target(width, height, VK_FORMAT_R8G8B8A8_UNORM);
 	image_info.initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;

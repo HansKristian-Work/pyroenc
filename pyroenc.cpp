@@ -112,6 +112,7 @@ struct VideoEncoderCaps
 {
 	VkVideoCapabilitiesKHR video_caps = { VK_STRUCTURE_TYPE_VIDEO_CAPABILITIES_KHR };
 	VkVideoEncodeCapabilitiesKHR encode_caps = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_CAPABILITIES_KHR };
+	VkVideoEncodeIntraRefreshCapabilitiesKHR intra_refresh_caps = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_INTRA_REFRESH_CAPABILITIES_KHR };
 
 	union
 	{
@@ -175,6 +176,8 @@ struct VideoSessionParameters
 
 	bool init_h264(Encoder::Impl &impl);
 	bool init_h265(Encoder::Impl &impl);
+
+	uint32_t intra_refresh_period = 0;
 };
 
 struct RateControl
@@ -1092,6 +1095,17 @@ struct H265EncodeInfo
 	           VkVideoEncodeTuningModeKHR tuning);
 };
 
+struct IntraRefreshInfo
+{
+	VkVideoEncodeIntraRefreshInfoKHR info =
+		{ VK_STRUCTURE_TYPE_VIDEO_ENCODE_INTRA_REFRESH_INFO_KHR };
+	VkVideoReferenceIntraRefreshInfoKHR reference_info =
+		{ VK_STRUCTURE_TYPE_VIDEO_REFERENCE_INTRA_REFRESH_INFO_KHR };
+
+	void setup(const VideoSessionParameters &params, RateControl &rate,
+	           VkVideoEncodeInfoKHR &info);
+};
+
 struct H264EncodeInfo
 {
 	VkVideoEncodeH264PictureInfoKHR h264_src_info = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_PICTURE_INFO_KHR };
@@ -1109,9 +1123,33 @@ struct H264EncodeInfo
 	VkVideoEncodeH264GopRemainingFrameInfoKHR gop_remaining =
 		{ VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_GOP_REMAINING_FRAME_INFO_KHR };
 
+	IntraRefreshInfo intra_refresh;
+
 	void setup(const VideoEncoderCaps &caps, const VideoSessionParameters &params, RateControl &rate,
 	           VkVideoBeginCodingInfoKHR &begin_info, VkVideoEncodeInfoKHR &info);
 };
+
+void IntraRefreshInfo::setup(
+		const VideoSessionParameters &params,
+		RateControl &rate, VkVideoEncodeInfoKHR &encode_info)
+{
+	encode_info.flags |= VK_VIDEO_ENCODE_INTRA_REFRESH_BIT_KHR;
+
+	info.intraRefreshCycleDuration = params.intra_refresh_period;
+
+	// The first IDR frame does not participate in intra refresh.
+	info.intraRefreshIndex = (rate.gop_frame_index - 1) % info.intraRefreshCycleDuration;
+
+	info.pNext = encode_info.pNext;
+	encode_info.pNext = &info;
+
+	// As explained in spec, we must limit the regions we can predict from when using intra refresh
+	// to be error resilient.
+	reference_info.dirtyIntraRefreshRegions =
+		info.intraRefreshCycleDuration - info.intraRefreshIndex;
+	reference_info.pNext = encode_info.pReferenceSlots[0].pNext;
+	const_cast<VkVideoReferenceSlotInfoKHR &>(encode_info.pReferenceSlots[0]).pNext = &reference_info;
+}
 
 void H264EncodeInfo::setup(
 		const VideoEncoderCaps &caps,
@@ -1189,6 +1227,9 @@ void H264EncodeInfo::setup(
 		else
 			h264_prev_ref.primary_pic_type = STD_VIDEO_H264_PICTURE_TYPE_P;
 	}
+
+	if (params.intra_refresh_period != 0 && !is_idr)
+		intra_refresh.setup(params, rate, info);
 
 	if (rate.info.gop_frames != UINT32_MAX)
 	{
@@ -1841,6 +1882,11 @@ const void *Encoder::get_encoded_parameters() const
 	return impl->session_params.encoded_parameters.data();
 }
 
+bool Encoder::intra_refresh_enabled() const
+{
+	return impl->session_params.intra_refresh_period != 0;
+}
+
 size_t Encoder::get_encoded_parameters_size() const
 {
 	return impl->session_params.encoded_parameters.size();
@@ -2061,6 +2107,12 @@ bool VideoEncoderCaps::setup(Encoder::Impl &impl)
 		return false;
 	}
 
+	if (impl.info.intra_refresh_period)
+	{
+		intra_refresh_caps.pNext = video_caps.pNext;
+		video_caps.pNext = &intra_refresh_caps;
+	}
+
 	if (VK_CALL(vkGetPhysicalDeviceVideoCapabilitiesKHR(impl.info.gpu, &impl.profile.profile_info, &video_caps)) != VK_SUCCESS)
 		return false;
 
@@ -2101,6 +2153,18 @@ bool VideoSession::init(Encoder::Impl &impl)
 	session_info.pictureFormat = impl.profile.input.format;
 	session_info.referencePictureFormat = impl.profile.input.format;
 	session_info.pStdHeaderVersion = &impl.caps.video_caps.stdHeaderVersion;
+
+	VkVideoEncodeSessionIntraRefreshCreateInfoKHR intra_refresh_session =
+		{ VK_STRUCTURE_TYPE_VIDEO_ENCODE_SESSION_INTRA_REFRESH_CREATE_INFO_KHR };
+
+	// BLOCK based intra is required if row or column is supported, and we don't really care
+	// which style of intra refresh is used, only that it is used.
+	if ((impl.caps.intra_refresh_caps.intraRefreshModes & VK_VIDEO_ENCODE_INTRA_REFRESH_MODE_BLOCK_BASED_BIT_KHR) != 0)
+	{
+		intra_refresh_session.intraRefreshMode = VK_VIDEO_ENCODE_INTRA_REFRESH_MODE_BLOCK_BASED_BIT_KHR;
+		intra_refresh_session.pNext = session_info.pNext;
+		session_info.pNext = &intra_refresh_session;
+	}
 
 	if (VK_CALL(vkCreateVideoSessionKHR(impl.info.device, &session_info, nullptr, &session)) != VK_SUCCESS)
 		return false;
@@ -2155,6 +2219,13 @@ void VideoSession::destroy(Encoder::Impl &impl)
 
 bool VideoSessionParameters::init(Encoder::Impl &impl)
 {
+	if ((impl.caps.intra_refresh_caps.intraRefreshModes & VK_VIDEO_ENCODE_INTRA_REFRESH_MODE_BLOCK_BASED_BIT_KHR) != 0)
+	{
+		intra_refresh_period = std::min<uint32_t>(
+			impl.caps.intra_refresh_caps.maxIntraRefreshCycleDuration,
+			impl.info.intra_refresh_period);
+	}
+
 	switch (impl.info.profile)
 	{
 	case Profile::H264_High:
@@ -2608,6 +2679,10 @@ RateControl::RateControl()
 
 bool RateControl::init(Encoder::Impl &impl)
 {
+	// There is no normal GOP structure for intra refresh.
+	if (impl.session_params.intra_refresh_period)
+		info.gop_frames = UINT32_MAX;
+
 	ctrl_info.pNext = &rate_info;
 	ctrl_info.flags = VK_VIDEO_CODING_CONTROL_RESET_BIT_KHR |
 	                  VK_VIDEO_CODING_CONTROL_ENCODE_RATE_CONTROL_BIT_KHR;

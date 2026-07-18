@@ -38,6 +38,13 @@ struct EncoderCreateInfo
 	uint32_t frame_rate_den;
 	float quality_level;
 
+	// Can be set to non-zero if VK_KHR_video_encode_intra_refresh is supported.
+	// Intra refresh will be enabled if supported.
+	// The intra refresh period will complete over
+	// this number of frames. The period may be lowered
+	// depending on implementation support.
+	uint32_t intra_refresh_period;
+
 	struct
 	{
 		VkVideoEncodeTuningModeKHR tuning;
@@ -68,6 +75,7 @@ struct RateControlInfo
 	uint32_t max_bitrate_kbits;
 	int32_t constant_qp;
 	// If UINT32_MAX, open/infinite GOP is used. Need force_idr to force a new IDR frame.
+	// When intra refresh is used, open GOP is forced.
 	uint32_t gop_frames;
 	RateControlMode mode;
 };
@@ -142,6 +150,9 @@ public:
 
 	const void *get_encoded_parameters() const;
 	size_t get_encoded_parameters_size() const;
+
+	// If enabled and supported.
+	bool intra_refresh_enabled() const;
 
 	struct Impl;
 private:
