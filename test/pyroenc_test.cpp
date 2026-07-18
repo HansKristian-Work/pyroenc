@@ -135,14 +135,22 @@ int main(int argc, char *argv[])
 				break;
 			}
 
-			cmd->image_barrier(*img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, encoder.get_conversion_image_layout(),
+			// Granite only likes modern sync2 layouts.
+			// They are interoperable.
+			const auto canonicalize_layout = [](VkImageLayout layout) {
+				if (layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+					return VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL;
+				else
+					return layout;
+			};
+
+			cmd->image_barrier(*img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, canonicalize_layout(encoder.get_conversion_image_layout()),
 			                   VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
 			                   encoder.get_conversion_dst_stage(), encoder.get_conversion_dst_access());
 
 			dev.submit(cmd);
 			dev.next_frame_context();
 		}
-
 
 		frame.pts = pts++;
 		if (encoder.send_frame(frame) != Result::Success)
