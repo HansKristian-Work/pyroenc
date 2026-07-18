@@ -1072,6 +1072,17 @@ void Encoder::Impl::record_host_barrier(VkCommandBuffer cmd, Frame &frame)
 	VK_CALL(vkCmdPipelineBarrier2(cmd, &deps));
 }
 
+struct IntraRefreshInfo
+{
+	VkVideoEncodeIntraRefreshInfoKHR info =
+		{ VK_STRUCTURE_TYPE_VIDEO_ENCODE_INTRA_REFRESH_INFO_KHR };
+	VkVideoReferenceIntraRefreshInfoKHR reference_info =
+		{ VK_STRUCTURE_TYPE_VIDEO_REFERENCE_INTRA_REFRESH_INFO_KHR };
+
+	void setup(const VideoSessionParameters &params, RateControl &rate,
+			   VkVideoEncodeInfoKHR &info);
+};
+
 struct H265EncodeInfo
 {
 	VkVideoEncodeH265PictureInfoKHR h265_src_info = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_H265_PICTURE_INFO_KHR };
@@ -1090,20 +1101,11 @@ struct H265EncodeInfo
 	VkVideoEncodeH265GopRemainingFrameInfoKHR gop_remaining =
 		{ VK_STRUCTURE_TYPE_VIDEO_ENCODE_H265_GOP_REMAINING_FRAME_INFO_KHR };
 
+	IntraRefreshInfo intra_refresh;
+
 	void setup(const VideoEncoderCaps &caps, const VideoSessionParameters &params, RateControl &rate,
 	           VkVideoBeginCodingInfoKHR &begin_info, VkVideoEncodeInfoKHR &info,
 	           VkVideoEncodeTuningModeKHR tuning);
-};
-
-struct IntraRefreshInfo
-{
-	VkVideoEncodeIntraRefreshInfoKHR info =
-		{ VK_STRUCTURE_TYPE_VIDEO_ENCODE_INTRA_REFRESH_INFO_KHR };
-	VkVideoReferenceIntraRefreshInfoKHR reference_info =
-		{ VK_STRUCTURE_TYPE_VIDEO_REFERENCE_INTRA_REFRESH_INFO_KHR };
-
-	void setup(const VideoSessionParameters &params, RateControl &rate,
-	           VkVideoEncodeInfoKHR &info);
 };
 
 struct H264EncodeInfo
@@ -1329,6 +1331,9 @@ void H265EncodeInfo::setup(
 		else
 			h265_prev_ref.pic_type = STD_VIDEO_H265_PICTURE_TYPE_P;
 	}
+
+	if (params.intra_refresh_period != 0 && !is_idr)
+		intra_refresh.setup(params, rate, info);
 
 	if (rate.info.gop_frames != UINT32_MAX)
 	{
