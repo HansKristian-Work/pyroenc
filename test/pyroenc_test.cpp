@@ -57,9 +57,15 @@ int main(int argc, char *argv[])
 	Device dev;
 	dev.set_context(ctx);
 
-	if (!dev.get_device_features().supports_video_encode_h265)
+	if (!dev.get_device_features().supports_video_encode_h264)
 	{
 		LOGE("Device does not support H.264 encode.\n");
+		return EXIT_FAILURE;
+	}
+
+	if (!dev.get_device_features().supports_video_encode_h265)
+	{
+		LOGE("Device does not support H.265 encode.\n");
 		return EXIT_FAILURE;
 	}
 
@@ -70,7 +76,7 @@ int main(int argc, char *argv[])
 	info.get_instance_proc_addr = Context::get_instance_proc_addr();
 	info.width = width;
 	info.height = height;
-	info.profile = Profile::H265_Main;
+	info.profile = Profile::H264_High;
 	info.quality_level = 1.0f;
 
 	info.encode_queue.queue =
@@ -185,7 +191,29 @@ int main(int argc, char *argv[])
 		auto status = encoded_frame.get_status();
 		size_t size = encoded_frame.get_size();
 
-		if (status == VK_QUERY_RESULT_STATUS_COMPLETE_KHR)
+		// Test error recovery in playback (for testing e.g. intra refresh behavior).
+		const auto skips_pts = [](uint64_t pts) {
+			switch (pts)
+			{
+#if 0
+			case 2:
+			case 100:
+			case 200:
+			case 300:
+			case 400:
+				return true;
+#endif
+
+			default:
+				return false;
+			}
+		};
+
+		if (skips_pts(pts))
+		{
+
+		}
+		else if (status == VK_QUERY_RESULT_STATUS_COMPLETE_KHR)
 		{
 			double overhead = encoded_frame.get_encoding_overhead();
 			LOGI("PTS = %u, IDR: %s, got frame size: %zu, overhead %.3f ms\n", unsigned(encoded_frame.get_pts()), encoded_frame.is_idr() ? "yes" : "no", size,
