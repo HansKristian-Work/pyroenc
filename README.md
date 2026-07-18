@@ -105,7 +105,7 @@ encoder.send_frame(info);
 `Encoder::send_frame()` will call `vkQueueSubmit2`, and the application must ensure
 that `Encoder::send_frame()` is not called concurrently with any other uses
 of either the conversion VkQueue or encoding VkQueue. It is invalid to
-concurrently submit to the same VkQueue in Vulkan.
+concurrently submit to the same VkQueue in Vulkan unless `VK_KHR_internally_synchronized_queues` is used.
 
 For synchronization, the image view's memory must be visible and owned by the queue.
 Generally, this will be `VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT` and `VK_ACCESS_2_SHADER_SAMPLED_READ_BIT`,
