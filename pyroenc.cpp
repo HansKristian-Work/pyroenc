@@ -1233,6 +1233,23 @@ void H264EncodeInfo::setup(
 	if (params.intra_refresh_period != 0 && !is_idr)
 		intra_refresh.setup(params, rate, info);
 
+	// Letting every image get a 0 framenum/poc seems to be a useful hack
+	// to be robust against packet loss when using intra refresh.
+	// The decoder will always know what POC 0/Frame 0 is
+	// as long as it has successfully received an IDR frame once.
+	// FFmpeg does not complain about this at least, so *shrug*.
+	// FFmpeg does not seem to deal with "gaps_in_frame_count" SPS flag
+	// for Vulkan decoder at least.
+	if (params.intra_refresh_period != 0)
+	{
+		h264_reconstructed_ref.PicOrderCnt = 0;
+		h264_reconstructed_ref.FrameNum = 0;
+		h264_prev_ref.FrameNum = 0;
+		h264_prev_ref.PicOrderCnt = 0;
+		pic.frame_num = 0;
+		pic.PicOrderCnt = 0;
+	}
+
 	if (rate.info.gop_frames != UINT32_MAX)
 	{
 		// This struct may be required by implementation. Providing it does not hurt.
