@@ -10,6 +10,13 @@
 using namespace PyroEnc;
 using namespace Vulkan;
 
+// Crude hack to allow testing both paths.
+static bool path_is_nv12(const char *path)
+{
+	auto *last = strrchr(path, '.');
+	return last && strcmp(last, ".nv12") == 0;
+}
+
 int main(int argc, char *argv[])
 {
 	if (argc != 7)
@@ -25,6 +32,8 @@ int main(int argc, char *argv[])
 		LOGE("Failed to open: %s\n", argv[2]);
 		return EXIT_FAILURE;
 	}
+
+	bool nv12 = path_is_nv12(argv[2]);
 
 	unsigned width = strtoul(argv[3], nullptr, 0);
 	unsigned height = strtoul(argv[4], nullptr, 0);
@@ -76,8 +85,19 @@ int main(int argc, char *argv[])
 	info.get_instance_proc_addr = Context::get_instance_proc_addr();
 	info.width = width;
 	info.height = height;
-	info.profile = Profile::H264_High;
+	info.profile = Profile::H265_Main;
 	info.quality_level = 1.0f;
+
+	EncoderDirectYCbCrInfo direct_ycbcr_info = {};
+	if (nv12)
+	{
+		direct_ycbcr_info.ycbcr_conversion = VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_709;
+		direct_ycbcr_info.ycbcr_range = VK_SAMPLER_YCBCR_RANGE_ITU_NARROW;
+		direct_ycbcr_info.color_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+		direct_ycbcr_info.chroma_location_x = VK_CHROMA_LOCATION_COSITED_EVEN;
+		direct_ycbcr_info.chroma_location_y = VK_CHROMA_LOCATION_MIDPOINT;
+		info.direct_ycbcr_info = &direct_ycbcr_info;
+	}
 
 	info.encode_queue.queue =
 			dev.get_queue_info().queues[QUEUE_INDEX_VIDEO_ENCODE];
@@ -112,12 +132,18 @@ int main(int argc, char *argv[])
 	auto image_info = Vulkan::ImageCreateInfo::render_target(width, height, VK_FORMAT_R8G8B8A8_UNORM);
 	image_info.initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
 	image_info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-	auto img = dev.create_image(image_info);
+	ImageHandle rgb_image;
+
+	if (!nv12)
+		rgb_image = dev.create_image(image_info);
 
 	FrameInfo frame = {};
-	frame.view = img->get_view().get_view().view;
-	frame.width = img->get_width();
-	frame.height = img->get_height();
+	if (rgb_image)
+	{
+		frame.view = rgb_image->get_view().get_view().view;
+		frame.width = rgb_image->get_width();
+		frame.height = rgb_image->get_height();
+	}
 
 	LOGI("Opening %s for encode output.\n", argv[1]);
 	FILE *file = fopen(argv[1], "wb");
@@ -136,13 +162,72 @@ int main(int argc, char *argv[])
 	int64_t pts = 0;
 	for (;;)
 	{
+		if (nv12)
+		{
+			EncoderDirectYCbCrImageInfo direct = {};
+			if (encoder.allocate_direct_ycbcr_image_info(direct) != PyroEnc::Result::Success)
+				break;
+
+			frame.view = direct.proxy_image_view;
+			frame.width = width;
+			frame.height = height;
+
+			auto cmd = dev.request_command_buffer(Vulkan::CommandBuffer::Type::AsyncCompute);
+
+			ImageCreateInfo wrapped_info = {};
+			wrapped_info.type = VK_IMAGE_TYPE_2D;
+			wrapped_info.format = direct.image_format;
+			wrapped_info.misc = IMAGE_MISC_NO_DEFAULT_VIEWS_BIT;
+			wrapped_info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR;
+			wrapped_info.width = direct.padded_width;
+			wrapped_info.height = direct.padded_height;
+			wrapped_info.depth = 1;
+			wrapped_info.layers = 1;
+			wrapped_info.levels = 1;
+			auto wrapped = dev.wrap_image(wrapped_info, direct.image);
+
+			cmd->image_barrier(*wrapped, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+			                   VK_PIPELINE_STAGE_NONE, VK_ACCESS_NONE,
+			                   VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+
+			void *ptr = cmd->update_image(*wrapped, {}, { width, height, 1 },
+				width, height, { VK_IMAGE_ASPECT_PLANE_0_BIT, 0, 0, 1 });
+
+			if (fread(ptr, 1, width * height, input) != width * height)
+			{
+				dev.submit_discard(cmd);
+				encoder.discard_direct_ycbcr_image_info(direct);
+				break;
+			}
+
+			// TODO: We don't really consider padding area here. Just leave it be for purposes of this test.
+			// It will likely be zeroed on alloc anyway.
+			ptr = cmd->update_image(*wrapped, {}, { width / 2, height / 2, 1 },
+			                        width / 2, height / 2, { VK_IMAGE_ASPECT_PLANE_1_BIT, 0, 0, 1 });
+
+			if (fread(ptr, 1, width * height / 2, input) != width * height / 2)
+			{
+				dev.submit_discard(cmd);
+				encoder.discard_direct_ycbcr_image_info(direct);
+				break;
+			}
+
+			cmd->image_barrier(*wrapped, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_VIDEO_ENCODE_SRC_KHR,
+			                   VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+			                   VK_PIPELINE_STAGE_NONE, VK_ACCESS_2_NONE);
+
+			Semaphore sem;
+			dev.submit(cmd, nullptr, 1, &sem);
+			dev.add_wait_semaphore(CommandBuffer::Type::VideoEncode, std::move(sem), VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, true);
+		}
+		else
 		{
 			auto cmd = dev.request_command_buffer(Vulkan::CommandBuffer::Type::AsyncCompute);
-			cmd->image_barrier(*img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+			cmd->image_barrier(*rgb_image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 			                   encoder.get_conversion_dst_stage(), VK_ACCESS_NONE,
 			                   VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
 
-			void *ptr = cmd->update_image(*img);
+			void *ptr = cmd->update_image(*rgb_image);
 			if (fread(ptr, sizeof(uint32_t), info.width * info.height, input) != info.width * info.height)
 			{
 				dev.submit_discard(cmd);
@@ -158,13 +243,14 @@ int main(int argc, char *argv[])
 					return layout;
 			};
 
-			cmd->image_barrier(*img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, canonicalize_layout(encoder.get_conversion_image_layout()),
+			cmd->image_barrier(*rgb_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, canonicalize_layout(encoder.get_conversion_image_layout()),
 			                   VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
 			                   encoder.get_conversion_dst_stage(), encoder.get_conversion_dst_access());
 
 			dev.submit(cmd);
-			dev.next_frame_context();
 		}
+
+		dev.next_frame_context();
 
 		frame.pts = pts++;
 		if (encoder.send_frame(frame) != Result::Success)
