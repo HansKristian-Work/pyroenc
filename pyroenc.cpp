@@ -2445,12 +2445,9 @@ bool VideoSessionParameters::init_h265(Encoder::Impl &impl)
 	// Aspect ratio of pixels (SAR), not actual aspect ratio. Confusing, I know.
 	vui.aspect_ratio_idc = STD_VIDEO_H265_ASPECT_RATIO_IDC_SQUARE;
 
-	vui.flags.chroma_loc_info_present_flag = 1;
-	vui.chroma_sample_loc_type_bottom_field = 0;
-	vui.chroma_sample_loc_type_top_field = 0;
-
 	vui.flags.video_signal_type_present_flag = 1;
-	vui.flags.video_full_range_flag = 0;
+	vui.flags.video_full_range_flag = impl.info.direct_ycbcr_info ?
+		int(impl.info.direct_ycbcr_info->ycbcr_range == VK_SAMPLER_YCBCR_RANGE_ITU_FULL) : 0;
 	vui.flags.colour_description_present_flag = 1;
 
 	vui.flags.vui_timing_info_present_flag = 1;
@@ -2458,9 +2455,55 @@ bool VideoSessionParameters::init_h265(Encoder::Impl &impl)
 	vui.vui_time_scale = impl.info.frame_rate_num;
 
 	vui.video_format = 5; // Unspecified. The specified ones cover legacy PAL/NTSC, etc.
-	vui.colour_primaries = 1; // BT.709
-	vui.transfer_characteristics = 1; // BT.709
-	vui.matrix_coeffs = 1; // BT.709
+	vui.flags.chroma_loc_info_present_flag = 1;
+
+	if (impl.info.direct_ycbcr_info)
+	{
+		// Left and Center are the only useful ones.
+		if (impl.info.direct_ycbcr_info->chroma_location_x == VK_CHROMA_LOCATION_MIDPOINT &&
+			impl.info.direct_ycbcr_info->chroma_location_y == VK_CHROMA_LOCATION_MIDPOINT)
+		{
+			vui.chroma_sample_loc_type_bottom_field = 1;
+			vui.chroma_sample_loc_type_top_field = 1;
+		}
+		else if (impl.info.direct_ycbcr_info->chroma_location_x == VK_CHROMA_LOCATION_COSITED_EVEN &&
+				 impl.info.direct_ycbcr_info->chroma_location_y == VK_CHROMA_LOCATION_MIDPOINT)
+		{
+			vui.chroma_sample_loc_type_bottom_field = 0;
+			vui.chroma_sample_loc_type_top_field = 0;
+		}
+		else
+		{
+			// *shrug*
+			vui.flags.chroma_loc_info_present_flag = 0;
+		}
+
+		if (impl.info.direct_ycbcr_info->color_space == VK_COLOR_SPACE_HDR10_ST2084_EXT)
+		{
+			vui.colour_primaries = 9; // BT.2020
+			vui.transfer_characteristics = 16; // PQ
+		}
+		else
+		{
+			vui.colour_primaries = 1; // BT.709
+			vui.transfer_characteristics = 1; // BT.709
+		}
+
+		if (impl.info.direct_ycbcr_info->ycbcr_conversion == VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_2020)
+			vui.matrix_coeffs = 9; // BT.2020 NCL
+		else if (impl.info.direct_ycbcr_info->ycbcr_conversion == VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_709)
+			vui.matrix_coeffs = 1; // BT.709
+		else
+			vui.matrix_coeffs = 5; // BT.601
+	}
+	else
+	{
+		vui.chroma_sample_loc_type_bottom_field = 0; // Left
+		vui.chroma_sample_loc_type_top_field = 0; // Left
+		vui.colour_primaries = 1; // BT.709
+		vui.transfer_characteristics = 1; // BT.709
+		vui.matrix_coeffs = 1; // BT.709
+	}
 
 	sps.flags.vui_parameters_present_flag = 1;
 	sps.pSequenceParameterSetVui = &vui;
@@ -2662,13 +2705,6 @@ bool VideoSessionParameters::init_h264(Encoder::Impl &impl)
 	// Aspect ratio of pixels (SAR), not actual aspect ratio. Confusing, I know.
 	vui.aspect_ratio_idc = STD_VIDEO_H264_ASPECT_RATIO_IDC_SQUARE;
 
-	// Center chroma siting would be a bit nicer,
-	// but NV drivers have a bug where they only write Left siting.
-	// Left siting is "standard", so it's more compatible to use that either way.
-	vui.flags.chroma_loc_info_present_flag = 1;
-	vui.chroma_sample_loc_type_bottom_field = 0;
-	vui.chroma_sample_loc_type_top_field = 0;
-
 	vui.flags.timing_info_present_flag = 1;
 	vui.flags.fixed_frame_rate_flag = 1;
 	// Multiplying by 2 here since H.264 seems to imply "field rate", even for progressive scan.
@@ -2680,10 +2716,46 @@ bool VideoSessionParameters::init_h264(Encoder::Impl &impl)
 	vui.num_units_in_tick = impl.info.frame_rate_den;
 
 	vui.flags.video_signal_type_present_flag = 1;
-	vui.flags.video_full_range_flag = 0;
+	vui.flags.video_full_range_flag =
+		impl.info.direct_ycbcr_info ?
+		int(impl.info.direct_ycbcr_info->ycbcr_range == VK_SAMPLER_YCBCR_RANGE_ITU_FULL) : 0;
+
 	vui.flags.color_description_present_flag = 1;
 
 	vui.video_format = 5; // Unspecified. The specified ones cover legacy PAL/NTSC, etc.
+	// Center chroma siting would be a bit nicer,
+	// but NV drivers have a bug where they only write Left siting.
+	// Left siting is "standard", so it's more compatible to use that either way.
+	vui.flags.chroma_loc_info_present_flag = 1;
+
+	if (impl.info.direct_ycbcr_info)
+	{
+		// Left and Center are the only useful ones.
+		if (impl.info.direct_ycbcr_info->chroma_location_x == VK_CHROMA_LOCATION_MIDPOINT &&
+		    impl.info.direct_ycbcr_info->chroma_location_y == VK_CHROMA_LOCATION_MIDPOINT)
+		{
+			vui.chroma_sample_loc_type_bottom_field = 1;
+			vui.chroma_sample_loc_type_top_field = 1;
+		}
+		else if (impl.info.direct_ycbcr_info->chroma_location_x == VK_CHROMA_LOCATION_COSITED_EVEN &&
+		         impl.info.direct_ycbcr_info->chroma_location_y == VK_CHROMA_LOCATION_MIDPOINT)
+		{
+			vui.chroma_sample_loc_type_bottom_field = 0;
+			vui.chroma_sample_loc_type_top_field = 0;
+		}
+		else
+		{
+			// *shrug*
+			vui.flags.chroma_loc_info_present_flag = 0;
+		}
+	}
+	else
+	{
+		vui.chroma_sample_loc_type_bottom_field = 0; // Left
+		vui.chroma_sample_loc_type_top_field = 0; // Left
+	}
+
+	// HDR is not well defined for H.264.
 	vui.colour_primaries = 1; // BT.709
 	vui.transfer_characteristics = 1; // BT.709
 	vui.matrix_coefficients = 1; // BT.709
