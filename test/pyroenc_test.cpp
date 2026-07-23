@@ -91,6 +91,7 @@ int main(int argc, char *argv[])
 	EncoderDirectYCbCrInfo direct_ycbcr_info = {};
 	if (nv12)
 	{
+		// The "default" for H.264/H.265 SDR.
 		direct_ycbcr_info.ycbcr_conversion = VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_709;
 		direct_ycbcr_info.ycbcr_range = VK_SAMPLER_YCBCR_RANGE_ITU_NARROW;
 		direct_ycbcr_info.color_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;

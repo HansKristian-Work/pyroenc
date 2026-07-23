@@ -35,6 +35,10 @@ the need arise.
 ### Currently supported
 
 - Take RGB as input (YCbCr conversion happens on GPU)
+  - The default MPEG style narrow range, left chroma, BT.709 is used in this path.
+- Get direct access to underlying YCbCr encode image for custom conversion.
+  - Supports passing down custom VUI information which is needed for HDR, full range, center chroma, etc ...
+  - Could be more efficient when you're already scaling anyway.
 - Adjust rate control dynamically
 - Insert IDR frames on-demand
 - Intra-refresh (not well-tested yet)
@@ -185,3 +189,5 @@ ffmpeg -i mytest.mkv -vf scale=1920:1080 -an -t 10 -pix_fmt rgba test.rgb
 # Playback
 ffplay test.h264
 ```
+
+If the raw video path is `*.nv12`, then it will be treated as raw NV12 and encoded appropriately.
