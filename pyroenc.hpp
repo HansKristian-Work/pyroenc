@@ -21,6 +21,43 @@ enum class Profile
 	H265_Main10
 };
 
+struct EncoderDirectYCbCrInfo
+{
+	VkSamplerYcbcrModelConversion ycbcr_conversion;
+	VkSamplerYcbcrRange ycbcr_range;
+	VkChromaLocation chroma_location_x;
+	VkChromaLocation chroma_location_y;
+	// Should be SRGB_NONLINEAR or HDR10.
+	VkColorSpaceKHR color_space;
+};
+
+struct EncoderDirectYCbCrImageInfo
+{
+	// The image will be created with flags = MUTABLE | EXTENDED_USAGE,
+	// usage = VIDEO | STORAGE | TRANSFER_DST.
+	// Client is responsible for synchronizing with the encode queue using semaphores
+	// and transitioning into ENCODE_SRC layout.
+	// The image received in "image" is idle on the GPU and there is no need to consider write-after-read hazards.
+	// Client ensures that these usage flags and creation flags are supported.
+	// The image handle is only valid until next call to send_frame.
+	// The proxy_image_view must be passed into view when encoding.
+	// The proxy_image_view is not necessarily a valid VkImageView handle and must not be accessed.
+	// The image is CONCURRENT shared with encode queue and conversion queue as passed into encoder.
+	VkImage image;
+	VkImageView proxy_image_view;
+	VkFormat image_format;
+	VkFormat plane_formats[3];
+	uint32_t num_planes;
+	uint32_t active_width;
+	uint32_t active_height;
+
+	// The actual resolution of the image. The full image should be filled with information,
+	// usually clamp_to_edge behavior or something like that, since it will participate in compression,
+	// it just gets cropped away.
+	uint32_t padded_width;
+	uint32_t padded_height;
+};
+
 struct EncoderCreateInfo
 {
 	PFN_vkGetInstanceProcAddr get_instance_proc_addr;
@@ -44,6 +81,14 @@ struct EncoderCreateInfo
 	// this number of frames. The period may be lowered
 	// depending on implementation support.
 	uint32_t intra_refresh_period;
+
+	// If not nullptr, the encoder is set to direct YCbCr mode where
+	// the user is responsible for converting to YCbCr with padding
+	// on edge of the image to align to codec expectations.
+	// The chroma siting (left or center) and YCbCr range is encoded in the VUI of the bitstream.
+	// If the encoder is created with this option, the image view passed into FrameInfo must be equal to the proxy image view
+	// obtained from EncoderDirectYCbCrImageInfo::proxy_image_view.
+	const EncoderDirectYCbCrInfo *direct_ycbcr_info;
 
 	struct
 	{
@@ -153,6 +198,11 @@ public:
 
 	// If enabled and supported.
 	bool intra_refresh_enabled() const;
+
+	// Allocates a frame slot equivalent to send_frame, may return NotReady.
+	Result allocate_direct_ycbcr_image_info(EncoderDirectYCbCrImageInfo &info);
+	// If a frame slot is allocated but will not be submitted (e.g. EOF happens), it must be passed back again.
+	void discard_direct_ycbcr_image_info(EncoderDirectYCbCrImageInfo &info);
 
 	struct Impl;
 private:

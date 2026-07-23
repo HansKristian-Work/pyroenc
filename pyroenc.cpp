@@ -6,6 +6,7 @@
 #include <utility>
 #include <vector>
 #include <queue>
+#include <algorithm>
 #include <assert.h>
 #include <stdio.h>
 
@@ -289,7 +290,7 @@ struct Encoder::Impl
 	bool create_buffer(Buffer &buffer, VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags props,
 	                   const void *pNext);
 	bool create_image(Image &image, uint32_t width, uint32_t height, uint32_t layers,
-	                  VkFormat format, VkImageUsageFlags usage,
+	                  VkFormat format, VkImageCreateFlags flags, VkImageUsageFlags usage,
 	                  const void *pNext);
 	bool create_timeline_semaphore(Timeline &timeline);
 	bool create_compute_pipeline(Pipeline &pipeline, const uint32_t *code, size_t code_size,
@@ -317,14 +318,18 @@ struct Encoder::Impl
 	VideoSession session;
 	VideoSessionParameters session_params;
 	RateControl rate;
+	EncoderDirectYCbCrInfo direct_ycbcr_info = {};
 };
 
 bool Encoder::Impl::create_image(Image &image, uint32_t width, uint32_t height, uint32_t layers, VkFormat format,
-                                 VkImageUsageFlags usage, const void *pNext)
+                                 VkImageCreateFlags create_flags, VkImageUsageFlags usage, const void *pNext)
 {
 	image = {};
 
+	uint32_t concurrent_families[2] = { info.encode_queue.family_index, info.conversion_queue.family_index };
+
 	VkImageCreateInfo image_info = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+	image_info.flags = create_flags;
 	image_info.format = format;
 	image_info.extent = { width, height, 1 };
 	image_info.imageType = VK_IMAGE_TYPE_2D;
@@ -336,6 +341,14 @@ bool Encoder::Impl::create_image(Image &image, uint32_t width, uint32_t height, 
 	image_info.samples = VK_SAMPLE_COUNT_1_BIT;
 	image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 	image_info.pNext = pNext;
+
+	if ((create_flags & VK_IMAGE_CREATE_EXTENDED_USAGE_BIT) != 0 &&
+	    info.encode_queue.family_index != info.conversion_queue.family_index)
+	{
+		image_info.sharingMode = VK_SHARING_MODE_CONCURRENT;
+		image_info.queueFamilyIndexCount = 2;
+		image_info.pQueueFamilyIndices = concurrent_families;
+	}
 
 	if (VK_CALL(vkCreateImage(info.device, &image_info, nullptr, &image.image)) != VK_SUCCESS)
 		return false;
@@ -357,6 +370,19 @@ bool Encoder::Impl::create_image(Image &image, uint32_t width, uint32_t height, 
 	view_info.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, VK_REMAINING_ARRAY_LAYERS };
 	view_info.viewType = layers > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
 	view_info.image = image.image;
+
+	constexpr VkImageUsageFlags video_image_usage_flags =
+			VK_IMAGE_USAGE_VIDEO_ENCODE_DPB_BIT_KHR |
+			VK_IMAGE_USAGE_VIDEO_ENCODE_DST_BIT_KHR |
+			VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR;
+
+	VkImageViewUsageCreateInfo usage_info = { VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO };
+
+	if ((usage & video_image_usage_flags) != 0)
+	{
+		usage_info.usage = usage & video_image_usage_flags;
+		view_info.pNext = &usage_info;
+	}
 
 	if (VK_CALL(vkCreateImageView(info.device, &view_info, nullptr, &image.view)) != VK_SUCCESS)
 		return false;
@@ -811,7 +837,7 @@ bool Encoder::Impl::init_dpb_resources()
 		for (auto &img: dpb.dpb)
 		{
 			if (!create_image(img, aligned_width, aligned_height, 1, profile.dpb.format,
-			                  VK_IMAGE_USAGE_VIDEO_ENCODE_DPB_BIT_KHR,
+			                  0, VK_IMAGE_USAGE_VIDEO_ENCODE_DPB_BIT_KHR,
 			                  &profile.profile_list))
 				return false;
 		}
@@ -819,22 +845,29 @@ bool Encoder::Impl::init_dpb_resources()
 	else
 	{
 		if (!create_image(dpb.array_dpb, aligned_width, aligned_height, DPBSize, profile.dpb.format,
-		                  VK_IMAGE_USAGE_VIDEO_ENCODE_DPB_BIT_KHR,
+		                  0, VK_IMAGE_USAGE_VIDEO_ENCODE_DPB_BIT_KHR,
 		                  &profile.profile_list))
 			return false;
 	}
 
-	if (!create_image(dpb.luma, aligned_width, aligned_height, 1, profile.input.luma_format,
-					  VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT, nullptr))
-		return false;
+	if (!info.direct_ycbcr_info)
+	{
+		if (!create_image(dpb.luma, aligned_width, aligned_height, 1, profile.input.luma_format,
+		                  0, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT, nullptr))
+		{
+			return false;
+		}
 
-	if (!create_image(dpb.chroma,
-	                  aligned_width >> profile.input.subsample_log2[0],
-	                  aligned_height >> profile.input.subsample_log2[1],
-	                  1,
-	                  profile.input.chroma_format,
-	                  VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT, nullptr))
-		return false;
+		if (!create_image(dpb.chroma,
+		                  aligned_width >> profile.input.subsample_log2[0],
+		                  aligned_height >> profile.input.subsample_log2[1],
+		                  1,
+		                  profile.input.chroma_format,
+		                  0, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT, nullptr))
+		{
+			return false;
+		}
+	}
 
 	return true;
 }
@@ -1590,7 +1623,7 @@ bool Encoder::Impl::submit_encode(Frame &frame, bool &is_idr)
 		rate.needs_reset = false;
 	}
 
-	if (info.conversion_queue.family_index != info.encode_queue.family_index)
+	if (!info.direct_ycbcr_info && info.conversion_queue.family_index != info.encode_queue.family_index)
 		record_acquire_barrier(cmd, frame);
 
 	return record_and_submit_encode(cmd, frame, is_idr);
@@ -1608,14 +1641,22 @@ bool Encoder::Impl::submit_encode_command_buffer(VkCommandBuffer cmd)
 	waits[0] = { VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO };
 	waits[1] = { VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO };
 
-	waits[0].semaphore = compute_timeline.timeline;
-	waits[0].value = compute_timeline.value;
-	waits[0].stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+	if (compute_timeline.value != 0)
+	{
+		waits[submit_info.waitSemaphoreInfoCount].semaphore = compute_timeline.timeline;
+		waits[submit_info.waitSemaphoreInfoCount].value = compute_timeline.value;
+		waits[submit_info.waitSemaphoreInfoCount].stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+		submit_info.waitSemaphoreInfoCount++;
+	}
 
 	// Wait for previous frame's encode to complete.
-	waits[1].semaphore = encode_timeline.timeline;
-	waits[1].value = encode_timeline.value;
-	waits[1].stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+	if (encode_timeline.value != 0)
+	{
+		waits[submit_info.waitSemaphoreInfoCount].semaphore = encode_timeline.timeline;
+		waits[submit_info.waitSemaphoreInfoCount].value = encode_timeline.value;
+		waits[submit_info.waitSemaphoreInfoCount].stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+		submit_info.waitSemaphoreInfoCount++;
+	}
 
 	signal.semaphore = encode_timeline.timeline;
 	signal.value = ++encode_timeline.value;
@@ -1624,7 +1665,6 @@ bool Encoder::Impl::submit_encode_command_buffer(VkCommandBuffer cmd)
 	submit_info.pCommandBufferInfos = &cmd_info;
 	submit_info.commandBufferInfoCount = 1;
 	submit_info.pWaitSemaphoreInfos = waits;
-	submit_info.waitSemaphoreInfoCount = waits[1].value != 0 ? 2 : 1;
 	submit_info.pSignalSemaphoreInfos = &signal;
 	submit_info.signalSemaphoreInfoCount = 1;
 
@@ -1637,7 +1677,25 @@ Result Encoder::Impl::send_frame(const FrameInfo &input)
 	if (input.width != info.width || input.height != info.height)
 		return Result::Error;
 
-	uint32_t frame_index = allocate_frame_pool_index();
+	uint32_t frame_index;
+
+	if (info.direct_ycbcr_info)
+	{
+		auto itr = std::find_if(std::begin(frame_pool), std::end(frame_pool),
+			[&](const Frame &frame)
+			{
+				return frame.image_ycbcr.view == input.view;
+			});
+
+		if (itr != std::end(frame_pool))
+			frame_index = itr - std::begin(frame_pool);
+		else
+			frame_index = UINT32_MAX;
+	}
+	else
+	{
+		frame_index = allocate_frame_pool_index();
+	}
 
 	// If application hasn't been freeing or consuming EncodedFrame objects, we'll exhaust the pool.
 	if (frame_index == UINT32_MAX)
@@ -1653,10 +1711,13 @@ Result Encoder::Impl::send_frame(const FrameInfo &input)
 
 	auto &frame = frame_pool[frame_index];
 
-	// Convert RGB to YCbCr.
-	if (!submit_conversion(input, frame))
-		return Result::Error;
-	frame.compute = compute_timeline.value;
+	if (!info.direct_ycbcr_info)
+	{
+		// Convert RGB to YCbCr.
+		if (!submit_conversion(input, frame))
+			return Result::Error;
+		frame.compute = compute_timeline.value;
+	}
 
 	// Submit encode to Vulkan.
 	bool is_idr = input.force_idr;
@@ -1714,10 +1775,26 @@ bool Encoder::Impl::init_frame_resource(Frame &frame)
 	uint32_t aligned_width = caps.get_aligned_width(info.width);
 	uint32_t aligned_height = caps.get_aligned_height(info.height);
 
-	if (!create_image(frame.image_ycbcr, aligned_width, aligned_height, 1, profile.input.format,
-	                  VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR,
-					  &profile.profile_list))
-		return false;
+	if (info.direct_ycbcr_info)
+	{
+		if (!create_image(frame.image_ycbcr, aligned_width, aligned_height, 1, profile.input.format,
+		                  VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT,
+		                  VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR |
+		                  VK_IMAGE_USAGE_STORAGE_BIT,
+		                  &profile.profile_list))
+		{
+			return false;
+		}
+	}
+	else
+	{
+		if (!create_image(frame.image_ycbcr, aligned_width, aligned_height, 1, profile.input.format,
+		                  0, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR,
+		                  &profile.profile_list))
+		{
+			return false;
+		}
+	}
 
 	VkCommandBufferAllocateInfo alloc_info = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
 	alloc_info.commandBufferCount = 1;
@@ -1791,6 +1868,13 @@ bool Encoder::Impl::init_query_pool()
 bool Encoder::Impl::init_encoder(const EncoderCreateInfo &info_)
 {
 	info = info_;
+
+	if (info.direct_ycbcr_info)
+	{
+		direct_ycbcr_info = *info.direct_ycbcr_info;
+		info.direct_ycbcr_info = &direct_ycbcr_info;
+	}
+
 	if (!init_func_table())
 		return false;
 
@@ -1907,6 +1991,44 @@ const void *Encoder::get_encoded_parameters() const
 bool Encoder::intra_refresh_enabled() const
 {
 	return impl->session_params.intra_refresh_period != 0;
+}
+
+void Encoder::discard_direct_ycbcr_image_info(EncoderDirectYCbCrImageInfo &info)
+{
+	auto itr = std::find_if(std::begin(impl->frame_pool), std::end(impl->frame_pool),
+	[&](const Frame &frame)
+	{
+		return frame.image_ycbcr.view == info.proxy_image_view;
+	});
+
+	if (itr != std::end(impl->frame_pool))
+	{
+		auto index = itr - std::begin(impl->frame_pool);
+		impl->release_frame_pool_index(index);
+	}
+}
+
+Result Encoder::allocate_direct_ycbcr_image_info(EncoderDirectYCbCrImageInfo &info)
+{
+	if (!impl->info.direct_ycbcr_info)
+		return Result::Error;
+
+	uint32_t index = impl->allocate_frame_pool_index();
+	if (index == UINT32_MAX)
+		return Result::NotReady;
+
+	info.image = impl->frame_pool[index].image_ycbcr.image;
+	info.proxy_image_view = impl->frame_pool[index].image_ycbcr.view;
+	info.image_format = impl->profile.input.format;
+	info.active_width = impl->info.width;
+	info.active_height = impl->info.height;
+	info.padded_width = impl->caps.get_aligned_width(impl->info.width);
+	info.padded_height = impl->caps.get_aligned_height(impl->info.height);
+	info.num_planes = 2;
+	info.plane_formats[0] = impl->profile.input.luma_format;
+	info.plane_formats[1] = impl->profile.input.chroma_format;
+
+	return Result::Success;
 }
 
 size_t Encoder::get_encoded_parameters_size() const
