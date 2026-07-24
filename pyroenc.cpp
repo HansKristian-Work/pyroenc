@@ -1894,7 +1894,6 @@ bool Encoder::Impl::init_query_pool()
 	if (VK_CALL(vkCreateQueryPool(info.device, &pool_info, nullptr, &query_pool)) != VK_SUCCESS)
 		return false;
 
-
 	uint32_t queue_count;
 	VK_CALL(vkGetPhysicalDeviceQueueFamilyProperties(info.gpu, &queue_count, nullptr));
 	std::vector<VkQueueFamilyProperties> props(queue_count);
@@ -2680,10 +2679,20 @@ bool VideoSessionParameters::init_h265(Encoder::Impl &impl)
 	// This is arbitrary.
 	sps.log2_max_pic_order_cnt_lsb_minus4 = 4;
 
-	// This is *not* the minimum ctbSizes. Force this to 8x8, otherwise stuff breaks since it's the minimum per spec.
-	// CB size != CTB size! I spent a full day on debugging this :(
-	sps.log2_min_luma_coding_block_size_minus3 = 0;
-	sps.log2_diff_max_min_luma_coding_block_size = find_msb(caps.ctbSizes) + 1; // First bit is 16x16.
+	if (impl.vk12_props.driverID == VK_DRIVER_ID_NVIDIA_PROPRIETARY)
+	{
+		// Massive perf optimization on NVIDIA. Seems to make encoding a little over 3x faster?!?!
+		sps.log2_min_luma_coding_block_size_minus3 = find_msb(caps.ctbSizes) + 1; // First bit is 16x16.
+		sps.log2_diff_max_min_luma_coding_block_size = 0;
+	}
+	else
+	{
+		// This is *not* the minimum ctbSizes. Force this to 8x8, otherwise stuff breaks since it's the minimum per spec.
+		// CB size != CTB size! I spent a full day on debugging this :(
+		sps.log2_min_luma_coding_block_size_minus3 = 0;
+		sps.log2_diff_max_min_luma_coding_block_size = find_msb(caps.ctbSizes) + 1; // First bit is 16x16.
+	}
+
 	sps.log2_min_luma_transform_block_size_minus2 = find_lsb(caps.transformBlockSizes);
 	sps.log2_diff_max_min_luma_transform_block_size =
 			find_msb(caps.transformBlockSizes) - find_lsb(caps.transformBlockSizes);
