@@ -179,6 +179,7 @@ struct VideoSessionParameters
 	bool init_h265(Encoder::Impl &impl);
 
 	uint32_t intra_refresh_period = 0;
+	uint32_t intra_refresh_slice_stride = 0;
 };
 
 struct RateControl
@@ -1116,11 +1117,13 @@ struct IntraRefreshInfo
 			   VkVideoEncodeInfoKHR &info);
 };
 
+static constexpr uint32_t MaxSlices = 64;
+
 struct H265EncodeInfo
 {
 	VkVideoEncodeH265PictureInfoKHR h265_src_info = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_H265_PICTURE_INFO_KHR };
-	VkVideoEncodeH265NaluSliceSegmentInfoKHR slice = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_H265_NALU_SLICE_SEGMENT_INFO_KHR };
-	StdVideoEncodeH265SliceSegmentHeader slice_header = {};
+	VkVideoEncodeH265NaluSliceSegmentInfoKHR slices[MaxSlices];
+	StdVideoEncodeH265SliceSegmentHeader slice_headers[MaxSlices];
 	StdVideoEncodeH265PictureInfo pic = {};
 	StdVideoEncodeH265ReferenceListsInfo ref_lists = {};
 
@@ -1144,8 +1147,8 @@ struct H265EncodeInfo
 struct H264EncodeInfo
 {
 	VkVideoEncodeH264PictureInfoKHR h264_src_info = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_PICTURE_INFO_KHR };
-	VkVideoEncodeH264NaluSliceInfoKHR slice = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_NALU_SLICE_INFO_KHR };
-	StdVideoEncodeH264SliceHeader slice_header = {};
+	VkVideoEncodeH264NaluSliceInfoKHR slices[MaxSlices];
+	StdVideoEncodeH264SliceHeader slice_headers[MaxSlices];
 	StdVideoEncodeH264PictureInfo pic = {};
 	StdVideoEncodeH264ReferenceListsInfo ref_lists = {};
 
@@ -1187,10 +1190,10 @@ void IntraRefreshInfo::setup(
 }
 
 void H264EncodeInfo::setup(
-		const VideoEncoderCaps &caps,
-		const VideoSessionParameters &params, RateControl &rate,
-		VkVideoBeginCodingInfoKHR &begin_info,
-		VkVideoEncodeInfoKHR &info)
+        const VideoEncoderCaps &caps,
+        const VideoSessionParameters &params, RateControl &rate,
+        VkVideoBeginCodingInfoKHR &begin_info,
+        VkVideoEncodeInfoKHR &info)
 {
 	bool is_idr = rate.gop_frame_index == 0;
 
@@ -1206,20 +1209,40 @@ void H264EncodeInfo::setup(
 		pic.idr_pic_id = rate.idr_pic_id++;
 	pic.pRefLists = &ref_lists;
 
-	slice.pStdSliceHeader = &slice_header;
-	slice_header.cabac_init_idc = STD_VIDEO_H264_CABAC_INIT_IDC_0;
-	slice_header.slice_type = is_idr ? STD_VIDEO_H264_SLICE_TYPE_I : STD_VIDEO_H264_SLICE_TYPE_P;
-	if (rate.rate_info.rateControlMode == VK_VIDEO_ENCODE_RATE_CONTROL_MODE_DISABLED_BIT_KHR)
+	uint32_t num_slices = 1;
+	uint32_t mbs_per_slice = 0;
+
+	if (params.intra_refresh_period != 0 &&
+	    (caps.intra_refresh_caps.intraRefreshModes & VK_VIDEO_ENCODE_INTRA_REFRESH_MODE_BLOCK_BASED_BIT_KHR) == 0)
 	{
-		slice.constantQp = rate.info.constant_qp;
-		if (slice.constantQp < caps.h264.caps.minQp)
-			slice.constantQp = caps.h264.caps.minQp;
-		else if (slice.constantQp > caps.h264.caps.maxQp)
-			slice.constantQp = caps.h264.caps.maxQp;
+		num_slices = params.intra_refresh_period;
+		mbs_per_slice = params.intra_refresh_slice_stride;
 	}
 
-	h264_src_info.naluSliceEntryCount = 1;
-	h264_src_info.pNaluSliceEntries = &slice;
+	for (uint32_t i = 0; i < num_slices; i++)
+	{
+		auto &slice = slices[i];
+		slice = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_NALU_SLICE_INFO_KHR };
+
+		auto &slice_header = slice_headers[i];
+		slice_header = {};
+		slice.pStdSliceHeader = &slice_header;
+		slice_header.cabac_init_idc = STD_VIDEO_H264_CABAC_INIT_IDC_0;
+		slice_header.slice_type = is_idr ? STD_VIDEO_H264_SLICE_TYPE_I : STD_VIDEO_H264_SLICE_TYPE_P;
+		slice_header.first_mb_in_slice = i * mbs_per_slice;
+
+		if (rate.rate_info.rateControlMode == VK_VIDEO_ENCODE_RATE_CONTROL_MODE_DISABLED_BIT_KHR)
+		{
+			slice.constantQp = rate.info.constant_qp;
+			if (slice.constantQp < caps.h264.caps.minQp)
+				slice.constantQp = caps.h264.caps.minQp;
+			else if (slice.constantQp > caps.h264.caps.maxQp)
+				slice.constantQp = caps.h264.caps.maxQp;
+		}
+	}
+
+	h264_src_info.naluSliceEntryCount = num_slices;
+	h264_src_info.pNaluSliceEntries = slices;
 	h264_src_info.pStdPictureInfo = &pic;
 	h264_src_info.pNext = info.pNext;
 	info.pNext = &h264_src_info;
@@ -1264,7 +1287,12 @@ void H264EncodeInfo::setup(
 	}
 
 	if (params.intra_refresh_period != 0 && !is_idr)
+	{
 		intra_refresh.setup(params, rate, info);
+
+		if ((caps.intra_refresh_caps.intraRefreshModes & VK_VIDEO_ENCODE_INTRA_REFRESH_MODE_BLOCK_BASED_BIT_KHR) == 0)
+			slice_headers[intra_refresh.info.intraRefreshIndex].slice_type = STD_VIDEO_H264_SLICE_TYPE_I;
+	}
 
 	// Letting every image get a 0 framenum/poc seems to be a useful hack
 	// to be robust against packet loss when using intra refresh.
@@ -1295,12 +1323,14 @@ void H264EncodeInfo::setup(
 	}
 }
 
+static uint32_t find_msb(uint32_t v);
+
 void H265EncodeInfo::setup(
-		const VideoEncoderCaps &caps,
-		const VideoSessionParameters &params, RateControl &rate,
-		VkVideoBeginCodingInfoKHR &begin_info,
-		VkVideoEncodeInfoKHR &info,
-		VkVideoEncodeTuningModeKHR tuning)
+        const VideoEncoderCaps &caps,
+        const VideoSessionParameters &params, RateControl &rate,
+        VkVideoBeginCodingInfoKHR &begin_info,
+        VkVideoEncodeInfoKHR &info,
+        VkVideoEncodeTuningModeKHR tuning)
 {
 	bool is_idr = rate.gop_frame_index == 0;
 
@@ -1323,33 +1353,52 @@ void H265EncodeInfo::setup(
 	if (is_idr)
 		rate.idr_pic_id++;
 
-	slice.pStdSliceSegmentHeader = &slice_header;
-	slice_header.slice_type = is_idr ? STD_VIDEO_H265_SLICE_TYPE_I : STD_VIDEO_H265_SLICE_TYPE_P;
-	slice_header.MaxNumMergeCand = 5;
-	slice_header.flags.first_slice_segment_in_pic_flag = 1;
+	uint32_t num_slices = 1;
+	uint32_t segments_per_slice = 0;
 
-	if (tuning != VK_VIDEO_ENCODE_TUNING_MODE_LOW_LATENCY_KHR &&
-	    tuning != VK_VIDEO_ENCODE_TUNING_MODE_ULTRA_LOW_LATENCY_KHR)
+	if (params.intra_refresh_period != 0 &&
+	    (caps.intra_refresh_caps.intraRefreshModes & VK_VIDEO_ENCODE_INTRA_REFRESH_MODE_BLOCK_BASED_BIT_KHR) == 0)
 	{
-		if ((caps.h265.caps.stdSyntaxFlags &
-		     VK_VIDEO_ENCODE_H265_STD_SAMPLE_ADAPTIVE_OFFSET_ENABLED_FLAG_SET_BIT_KHR) != 0)
+		num_slices = params.intra_refresh_period;
+		segments_per_slice = params.intra_refresh_slice_stride;
+	}
+
+	for (uint32_t i = 0; i < num_slices; i++)
+	{
+		auto &slice = slices[i];
+		slice = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_H265_NALU_SLICE_SEGMENT_INFO_KHR };
+		auto &slice_header = slice_headers[i];
+		slice_header = {};
+
+		slice.pStdSliceSegmentHeader = &slice_header;
+		slice_header.slice_type = is_idr ? STD_VIDEO_H265_SLICE_TYPE_I : STD_VIDEO_H265_SLICE_TYPE_P;
+		slice_header.MaxNumMergeCand = 5;
+		slice_header.flags.first_slice_segment_in_pic_flag = i == 0;
+		slice_header.slice_segment_address = num_slices * segments_per_slice;
+
+		if (tuning != VK_VIDEO_ENCODE_TUNING_MODE_LOW_LATENCY_KHR &&
+			tuning != VK_VIDEO_ENCODE_TUNING_MODE_ULTRA_LOW_LATENCY_KHR)
 		{
-			slice_header.flags.slice_sao_chroma_flag = 1;
-			slice_header.flags.slice_sao_luma_flag = 1;
+			if ((caps.h265.caps.stdSyntaxFlags &
+				 VK_VIDEO_ENCODE_H265_STD_SAMPLE_ADAPTIVE_OFFSET_ENABLED_FLAG_SET_BIT_KHR) != 0)
+			{
+				slice_header.flags.slice_sao_chroma_flag = 1;
+				slice_header.flags.slice_sao_luma_flag = 1;
+			}
+		}
+
+		if (rate.rate_info.rateControlMode == VK_VIDEO_ENCODE_RATE_CONTROL_MODE_DISABLED_BIT_KHR)
+		{
+			slice.constantQp = rate.info.constant_qp;
+			if (slice.constantQp < caps.h265.caps.minQp)
+				slice.constantQp = caps.h265.caps.minQp;
+			else if (slice.constantQp > caps.h265.caps.maxQp)
+				slice.constantQp = caps.h265.caps.maxQp;
 		}
 	}
 
-	if (rate.rate_info.rateControlMode == VK_VIDEO_ENCODE_RATE_CONTROL_MODE_DISABLED_BIT_KHR)
-	{
-		slice.constantQp = rate.info.constant_qp;
-		if (slice.constantQp < caps.h265.caps.minQp)
-			slice.constantQp = caps.h265.caps.minQp;
-		else if (slice.constantQp > caps.h265.caps.maxQp)
-			slice.constantQp = caps.h265.caps.maxQp;
-	}
-
-	h265_src_info.naluSliceSegmentEntryCount = 1;
-	h265_src_info.pNaluSliceSegmentEntries = &slice;
+	h265_src_info.naluSliceSegmentEntryCount = num_slices;
+	h265_src_info.pNaluSliceSegmentEntries = slices;
 	h265_src_info.pStdPictureInfo = &pic;
 	h265_src_info.pNext = info.pNext;
 	info.pNext = &h265_src_info;
@@ -1383,7 +1432,12 @@ void H265EncodeInfo::setup(
 	}
 
 	if (params.intra_refresh_period != 0 && !is_idr)
+	{
 		intra_refresh.setup(params, rate, info);
+
+		if ((caps.intra_refresh_caps.intraRefreshModes & VK_VIDEO_ENCODE_INTRA_REFRESH_MODE_BLOCK_BASED_BIT_KHR) == 0)
+			slice_headers[intra_refresh.info.intraRefreshIndex].slice_type = STD_VIDEO_H265_SLICE_TYPE_I;
+	}
 
 	if (rate.info.gop_frames != UINT32_MAX)
 	{
@@ -2308,8 +2362,12 @@ bool VideoSession::init(Encoder::Impl &impl)
 	// BLOCK based intra is required if row or column is supported, and we don't really care
 	// which style of intra refresh is used, only that it is used.
 	if ((impl.caps.intra_refresh_caps.intraRefreshModes & VK_VIDEO_ENCODE_INTRA_REFRESH_MODE_BLOCK_BASED_BIT_KHR) != 0)
-	{
 		intra_refresh_session.intraRefreshMode = VK_VIDEO_ENCODE_INTRA_REFRESH_MODE_BLOCK_BASED_BIT_KHR;
+	else if ((impl.caps.intra_refresh_caps.intraRefreshModes & VK_VIDEO_ENCODE_INTRA_REFRESH_MODE_PER_PICTURE_PARTITION_BIT_KHR) != 0)
+		intra_refresh_session.intraRefreshMode = VK_VIDEO_ENCODE_INTRA_REFRESH_MODE_PER_PICTURE_PARTITION_BIT_KHR;
+
+	if (intra_refresh_session.intraRefreshMode != VK_VIDEO_ENCODE_INTRA_REFRESH_MODE_NONE_KHR)
+	{
 		intra_refresh_session.pNext = session_info.pNext;
 		session_info.pNext = &intra_refresh_session;
 	}
@@ -2372,6 +2430,59 @@ bool VideoSessionParameters::init(Encoder::Impl &impl)
 		intra_refresh_period = std::min<uint32_t>(
 			impl.caps.intra_refresh_caps.maxIntraRefreshCycleDuration,
 			impl.info.intra_refresh_period);
+	}
+	else if ((impl.caps.intra_refresh_caps.intraRefreshModes & VK_VIDEO_ENCODE_INTRA_REFRESH_MODE_PER_PICTURE_PARTITION_BIT_KHR) != 0)
+	{
+		// We'll need to use multiple slices instead.
+		intra_refresh_period = std::min<uint32_t>(
+			impl.caps.intra_refresh_caps.maxIntraRefreshCycleDuration,
+			impl.info.intra_refresh_period);
+
+		intra_refresh_period = std::min<uint32_t>(MaxSlices, intra_refresh_period);
+
+		uint32_t mb_y = 0;
+
+		if (impl.info.profile == Profile::H264_High)
+		{
+			intra_refresh_period = std::min<uint32_t>(
+				impl.caps.h264.caps.maxSliceCount,
+				intra_refresh_period);
+
+			mb_y = (impl.caps.get_aligned_width(impl.info.height) + 15) / 16;
+		}
+		else if (impl.info.profile == Profile::H265_Main || impl.info.profile == Profile::H265_Main10)
+		{
+			intra_refresh_period = std::min<uint32_t>(
+				impl.caps.h265.caps.maxSliceSegmentCount,
+				intra_refresh_period);
+
+			uint32_t height = impl.caps.get_aligned_height(impl.info.height);
+			uint32_t max_ctb_y = 16u << find_msb(impl.caps.h265.caps.ctbSizes);
+			mb_y = (height + max_ctb_y - 1) / max_ctb_y;
+		}
+
+		// Not guaranteed that we support non-rectangular regions here,
+		// so just split it up accordingly.
+		uint32_t num_slices = 1;
+
+		for (uint32_t rows = 1; rows <= mb_y; rows++)
+		{
+			num_slices = (mb_y + rows - 1) / rows;
+			if (num_slices <= intra_refresh_period)
+			{
+				intra_refresh_period = num_slices;
+				intra_refresh_slice_stride = rows;
+				if (impl.info.profile == Profile::H264_High)
+					intra_refresh_slice_stride *= (impl.caps.get_aligned_width(impl.info.width) + 15) / 16;
+				break;
+			}
+		}
+
+		if (intra_refresh_slice_stride == 0)
+		{
+			// Shouldn't happen.
+			return false;
+		}
 	}
 
 	switch (impl.info.profile)
