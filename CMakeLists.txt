@@ -50,4 +50,5 @@ target_include_directories(pyroenc PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 if (IS_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/Granite)
     add_subdirectory(test)
+    add_subdirectory(offline)
 endif()
